@@ -1,0 +1,1189 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DigitalStore Perú</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<style>
+  :root{
+    --base-950:#05060a; --base-900:#0b0e17; --base-800:#121623; --base-700:#1a1f2e; --base-600:#232939;
+    --accent-400:#4fd1ff; --accent-500:#22b8ff; --accent-600:#0090e0;
+    --signal-400:#ff5470; --signal-500:#ff2d4d; --signal-600:#e00030;
+    --success-500:#22c55e;
+  }
+  *{box-sizing:border-box;}
+  html{color-scheme:dark;}
+  body{
+    margin:0; min-height:100vh; background:var(--base-950);
+    font-family:'Inter',system-ui,sans-serif; color:#fff;
+  }
+  ::-webkit-scrollbar{width:8px;}
+  ::-webkit-scrollbar-track{background:var(--base-900);}
+  ::-webkit-scrollbar-thumb{background:var(--base-600); border-radius:8px;}
+  a{color:inherit; text-decoration:none;}
+  button{font-family:inherit; cursor:pointer;}
+  input[type=text],input[type=tel],input[type=number],input[type=password]{font-family:inherit;}
+  .line-clamp-1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .neon-hover:hover{box-shadow:0 0 20px rgba(34,184,255,.35);}
+  .neon-red-hover:hover{box-shadow:0 0 20px rgba(255,45,77,.35);}
+  .spin{animation:spin 1s linear infinite;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .fade-in{animation:fadeIn .18s ease-out;}
+  @keyframes fadeIn{from{opacity:0} to{opacity:1}}
+  .slide-up{animation:slideUp .22s cubic-bezier(.2,.8,.2,1);}
+  @keyframes slideUp{from{transform:translateY(40px);opacity:0} to{transform:translateY(0);opacity:1}}
+  .card-hover:hover{transform:translateY(-6px); border-color:rgba(34,184,255,.6); box-shadow:0 0 20px rgba(34,184,255,.35);}
+  .card-hover{transition:transform .2s cubic-bezier(.2,.8,.2,1), border-color .2s, box-shadow .2s;}
+  input:focus, select:focus, textarea:focus{outline:none; border-color:var(--accent-500)!important; box-shadow:0 0 0 1px var(--accent-500);}
+  ::placeholder{color:#6b7280;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useMemo, useCallback } = React;
+
+/* ============================================================
+   DATOS SEMILLA (equivalentes a sql/schema.sql) — persistidos
+   en localStorage la primera vez que se abre la tienda.
+   ============================================================ */
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-" + Math.random().toString(36).slice(2));
+
+/* Duraciones sugeridas para que el admin arme los planes de cada producto.
+   El admin decide cuáles de estas (o una duración libre) ofrecer por producto;
+   no todos los productos tienen que tener todas las opciones. */
+const DURATION_PRESETS = ["1 mes", "2 meses", "3 meses", "6 meses", "12 meses / 1 año"];
+const plan = (duration_label, price) => ({ id: uid(), duration_label, price });
+
+const SEED_CATEGORIES = [
+  { id: "cat-membresias", name: "Membresías", slug: "membresias" },
+  { id: "cat-cursos", name: "Cursos Online", slug: "cursos-online" },
+  { id: "cat-software", name: "Software y Licencias", slug: "software-licencias" },
+  { id: "cat-plantillas", name: "Plantillas Digitales", slug: "plantillas-digitales" },
+];
+
+const SEED_PRODUCTS = [
+  {
+    id: uid(), title: "Membresía Premium Fitness", slug: "membresia-premium-fitness",
+    category_id: "cat-membresias",
+    description: "Acceso completo a rutinas de entrenamiento y planes nutricionales personalizados.",
+    image_url: "https://images.unsplash.com/photo-1571902943202-507ec2618e8f?q=80&w=600&auto=format&fit=crop",
+    stock: 25, is_active: true,
+    features: ["Acceso ilimitado a rutinas", "Plan nutricional incluido", "Soporte por WhatsApp"],
+    plans: [
+      plan("1 mes", 39.90),
+      plan("3 meses", 99.90),
+    ],
+  },
+  {
+    id: uid(), title: "Curso Online: Excel Avanzado", slug: "curso-excel-avanzado",
+    category_id: "cat-cursos",
+    description: "Curso completo de Excel desde nivel intermedio hasta avanzado con certificado.",
+    image_url: "https://images.unsplash.com/photo-1454165804606-c3d57bc86b40?q=80&w=600&auto=format&fit=crop",
+    stock: 100, is_active: true,
+    features: ["+40 horas de video", "Certificado digital", "Acceso de por vida (12 meses renovable)"],
+    plans: [
+      plan("12 meses / 1 año", 59.90),
+    ],
+  },
+  {
+    id: uid(), title: "Licencia Software de Diseño Pro", slug: "licencia-software-diseno",
+    category_id: "cat-software",
+    description: "Licencia anual de suite de diseño gráfico profesional.",
+    image_url: "https://images.unsplash.com/photo-1626785774573-4b799315345d?q=80&w=600&auto=format&fit=crop",
+    stock: 8, is_active: true,
+    features: ["1 activación por licencia", "Actualizaciones incluidas", "Soporte técnico"],
+    plans: [
+      plan("12 meses / 1 año", 149.90),
+    ],
+  },
+  {
+    id: uid(), title: "Pack de Plantillas Canva Pro", slug: "pack-plantillas-canva",
+    category_id: "cat-plantillas",
+    description: "Más de 200 plantillas editables para redes sociales y presentaciones.",
+    image_url: "https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?q=80&w=600&auto=format&fit=crop",
+    stock: 0, is_active: true,
+    features: ["200+ plantillas editables", "Formato Canva Pro", "Actualizaciones mensuales"],
+    plans: [
+      plan("1 mes", 19.90),
+      plan("2 meses", 34.90),
+    ],
+  },
+];
+
+const DEFAULT_SETTINGS = {
+  id: 1,
+  whatsapp_number: "51999999999",
+  yape_number: "999 999 999",
+  yape_qr_url: null,
+  plin_number: "999 999 999",
+  plin_qr_url: null,
+  bank_bcp_account: "191-1234567-0-12",
+  bank_interbank_account: "898-1234567890",
+};
+
+const DEFAULT_ADMIN_PASSWORD = "admin123";
+
+/* ============================================================
+   "BASE DE DATOS" LOCAL — localStorage helpers
+   ============================================================ */
+const DB_KEY = "digitalstore_db_v1";
+
+/* ============================================================
+   SINCRONIZACIÓN EN LA NUBE (Firebase Firestore)
+   ------------------------------------------------------------
+   Para que los cambios que haces en el panel admin se vean al
+   instante en el celular/PC de cualquier visitante, la tienda
+   necesita una base de datos compartida (no basta con
+   localStorage, porque eso vive solo en el navegador de cada
+   persona).
+
+   PASOS PARA ACTIVARLO (gratis, 5 minutos):
+   1) Entra a https://console.firebase.google.com y crea un proyecto.
+   2) Dentro del proyecto: "Compilación" → "Firestore Database" →
+      "Crear base de datos" (modo producción está bien).
+   3) En Firestore → pestaña "Reglas", pega esto y publica
+      (demo simple; para producción real conviene reglas más
+      estrictas, pero esto ya te sirve para empezar):
+        rules_version = '2';
+        service cloud.firestore {
+          match /databases/{database}/documents {
+            match /{document=**} { allow read, write: if true; }
+          }
+        }
+   4) En "Configuración del proyecto" → "Tus apps" → icono </> (Web),
+      registra la app y copia el objeto firebaseConfig que te dan.
+   5) Pega esos valores abajo, reemplazando el objeto de ejemplo.
+      Mientras esté vacío ("" en apiKey), la tienda sigue
+      funcionando solo con localStorage (sin sincronizar entre
+      dispositivos), así que nada se rompe si aún no lo configuras.
+   ============================================================ */
+const firebaseConfig = {
+  apiKey: "AIzaSyAJeUbotsoP6I_59y_YxaFcE49ynpG9ZNY",
+  authDomain: "digitalstore-d72b9.firebaseapp.com",
+  projectId: "digitalstore-d72b9",
+  storageBucket: "digitalstore-d72b9.firebasestorage.app",
+  messagingSenderId: "329843122468",
+  appId: "1:329843122468:web:34a31594b964ead09cd3b1",
+};
+
+const FIRESTORE_COLLECTION = "digitalstore";
+const FIRESTORE_DOC = "main";
+
+let firestoreDB = null;
+const cloudSyncEnabled = !!firebaseConfig.apiKey;
+if (cloudSyncEnabled) {
+  try {
+    firebase.initializeApp(firebaseConfig);
+    firestoreDB = firebase.firestore();
+  } catch (e) {
+    console.error("No se pudo inicializar Firebase:", e);
+  }
+}
+
+function getCloudDocRef() {
+  return firestoreDB.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC);
+}
+
+/* Escucha cambios en tiempo real. Cada vez que CUALQUIER persona
+   (tú desde el admin, u otro dispositivo) modifica los datos, este
+   callback se dispara al instante con la versión más nueva. */
+function subscribeToCloud(onData) {
+  if (!cloudSyncEnabled || !firestoreDB) return () => {};
+  return getCloudDocRef().onSnapshot(
+    (snap) => {
+      if (snap.exists) {
+        const data = migrateDB(snap.data());
+        localStorage.setItem(DB_KEY, JSON.stringify(data));
+        onData(data);
+      } else {
+        // Primera vez: no existe el documento en la nube todavía,
+        // así que lo creamos con lo que haya local (o el seed).
+        const initial = migrateDB(loadLocalOnly());
+        getCloudDocRef().set(initial).catch((e) => console.error("Error creando doc inicial:", e));
+      }
+    },
+    (err) => console.error("Error escuchando Firestore:", err)
+  );
+}
+
+function loadLocalOnly() {
+  try {
+    const raw = localStorage.getItem(DB_KEY);
+    if (raw) return migrateDB(JSON.parse(raw));
+  } catch (e) {}
+  return {
+    categories: SEED_CATEGORIES,
+    products: SEED_PRODUCTS,
+    orders: [],
+    settings: DEFAULT_SETTINGS,
+    adminPassword: DEFAULT_ADMIN_PASSWORD,
+  };
+}
+
+/* Migra productos guardados con el esquema antiguo (price + duration_label
+   sueltos) al nuevo esquema de "plans" (varios pares duración/precio por
+   producto, definidos libremente por el admin). */
+function migrateProduct(p) {
+  if (Array.isArray(p.plans) && p.plans.length > 0) return p;
+  const { price, duration_label, ...rest } = p;
+  return { ...rest, plans: [plan(duration_label || "1 mes", price || 0)] };
+}
+
+function migrateDB(db) {
+  if (!db || !Array.isArray(db.products)) return db;
+  return { ...db, products: db.products.map(migrateProduct) };
+}
+
+function loadDB() {
+  const db = loadLocalOnly();
+  localStorage.setItem(DB_KEY, JSON.stringify(db));
+  return db;
+}
+
+function saveDB(db) {
+  localStorage.setItem(DB_KEY, JSON.stringify(db));
+  if (cloudSyncEnabled && firestoreDB) {
+    getCloudDocRef().set(db).catch((e) => console.error("Error guardando en la nube:", e));
+  }
+}
+
+/* ============================================================
+   ICONOS (SVG inline, sin dependencias externas)
+   ============================================================ */
+const Icon = {
+  Search: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>,
+  WhatsApp: (p) => <svg {...p} viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.1-.472-.149-.67.15-.198.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.15-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M12 2C6.477 2 2 6.477 2 12c0 1.85.505 3.58 1.382 5.06L2 22l5.06-1.382A9.953 9.953 0 0 0 12 22c5.523 0 10-4.477 10-10S17.523 2 12 2zm0 18a7.95 7.95 0 0 1-4.062-1.115l-.29-.173-3.017.826.826-3.017-.173-.29A7.95 7.95 0 0 1 4 12c0-4.411 3.589-8 8-8s8 3.589 8 8-3.589 8-8 8z"/></svg>,
+  Menu: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="18" x2="20" y2="18"/></svg>,
+  X: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
+  Check: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>,
+  ImageOff: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="2" y1="2" x2="22" y2="22"/><path d="M10.41 10.41a2 2 0 1 1-2.83-2.83"/><line x1="13.5" y1="13.5" x2="6" y2="21"/><path d="M18 12l-2-2"/><path d="M21 15V5a2 2 0 0 0-2-2H9"/><path d="M3 3l18 18"/></svg>,
+  Sliders: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="21" y1="4" x2="14" y2="4"/><line x1="10" y1="4" x2="3" y2="4"/><line x1="21" y1="12" x2="12" y2="12"/><line x1="8" y1="12" x2="3" y2="12"/><line x1="21" y1="20" x2="16" y2="20"/><line x1="12" y1="20" x2="3" y2="20"/><line x1="14" y1="2" x2="14" y2="6"/><line x1="8" y1="10" x2="8" y2="14"/><line x1="16" y1="18" x2="16" y2="22"/></svg>,
+  Smartphone: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>,
+  Bank: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="22" x2="21" y2="22"/><line x1="6" y1="18" x2="6" y2="11"/><line x1="10" y1="18" x2="10" y2="11"/><line x1="14" y1="18" x2="14" y2="11"/><line x1="18" y1="18" x2="18" y2="11"/><polygon points="12 2 20 7 4 7"/></svg>,
+  Loader: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/></svg>,
+  Lock: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>,
+  Grid: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>,
+  Box: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>,
+  List: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>,
+  Settings: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+  LogOut: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>,
+  Trash: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>,
+  Edit: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
+  Plus: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+};
+
+/* ============================================================
+   HEADER
+   ============================================================ */
+function Header({ categories, search, onSearchChange, activeCategory, onCategoryChange, whatsappNumber }) {
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const waLink = `https://wa.me/${whatsappNumber}?text=${encodeURIComponent("Hola, quisiera más información sobre sus productos digitales.")}`;
+
+  const catBtnStyle = (active) => ({
+    borderRadius: 999, padding: "6px 12px", fontSize: 14, transition: "all .15s",
+    background: active ? "rgba(34,184,255,.2)" : "transparent",
+    color: active ? "var(--accent-400)" : "#9ca3af",
+    border: "none",
+  });
+
+  return (
+    <header style={{ position: "sticky", top: 0, zIndex: 40, borderBottom: "1px solid rgba(26,31,46,.6)", background: "rgba(5,6,10,.9)", backdropFilter: "blur(8px)" }}>
+      <div style={{ maxWidth: 1280, margin: "0 auto", display: "flex", alignItems: "center", gap: 16, padding: "12px 16px" }}>
+        <a href="#/" style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+          <div style={{ width: 36, height: 36, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, background: "linear-gradient(135deg, var(--accent-500), var(--signal-500))" }}>D</div>
+          <span style={{ fontSize: 18, fontWeight: 600, letterSpacing: "-0.02em" }}>Digital<span style={{ color: "var(--accent-400)" }}>Store</span></span>
+        </a>
+
+        <div className="desktop-search" style={{ position: "relative", flex: 1, display: "none" }}>
+          <Icon.Search style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", width: 16, height: 16, color: "#4b5563", pointerEvents: "none" }} />
+          <input value={search} onChange={(e) => onSearchChange(e.target.value)} placeholder="Buscar productos o suscripciones..."
+            style={{ width: "100%", borderRadius: 999, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 16px 8px 36px", fontSize: 14, color: "#fff" }} />
+        </div>
+
+        <nav className="desktop-nav" style={{ display: "none", alignItems: "center", gap: 4 }}>
+          <button onClick={() => onCategoryChange(null)} style={catBtnStyle(activeCategory === null)}>Todos</button>
+          {categories.map((c) => (
+            <button key={c.id} onClick={() => onCategoryChange(c.slug)} style={catBtnStyle(activeCategory === c.slug)}>{c.name}</button>
+          ))}
+        </nav>
+
+        <a href={waLink} target="_blank" rel="noopener noreferrer" className="desktop-wa"
+          style={{ display: "none", alignItems: "center", gap: 8, borderRadius: 999, background: "var(--success-500)", padding: "8px 16px", fontSize: 14, fontWeight: 500, color: "#fff", boxShadow: "0 4px 10px rgba(0,0,0,.3)" }}>
+          <Icon.WhatsApp style={{ width: 16, height: 16 }} /> WhatsApp
+        </a>
+
+        <button onClick={() => setMobileOpen((v) => !v)} className="mobile-toggle" style={{ marginLeft: "auto", background: "none", border: "none", color: "#fff", padding: 8, borderRadius: 8 }}>
+          {mobileOpen ? <Icon.X style={{ width: 20, height: 20 }} /> : <Icon.Menu style={{ width: 20, height: 20 }} />}
+        </button>
+      </div>
+
+      {mobileOpen && (
+        <div className="mobile-panel" style={{ borderTop: "1px solid var(--base-700)", background: "var(--base-900)", padding: 16 }}>
+          <div style={{ position: "relative", marginBottom: 12 }}>
+            <Icon.Search style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", width: 16, height: 16, color: "#4b5563" }} />
+            <input value={search} onChange={(e) => onSearchChange(e.target.value)} placeholder="Buscar..."
+              style={{ width: "100%", borderRadius: 999, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 16px 8px 36px", fontSize: 14, color: "#fff" }} />
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+            <button onClick={() => onCategoryChange(null)} style={{ ...catBtnStyle(activeCategory === null), fontSize: 12, background: activeCategory === null ? "rgba(34,184,255,.2)" : "var(--base-800)" }}>Todos</button>
+            {categories.map((c) => (
+              <button key={c.id} onClick={() => onCategoryChange(c.slug)} style={{ ...catBtnStyle(activeCategory === c.slug), fontSize: 12, background: activeCategory === c.slug ? "rgba(34,184,255,.2)" : "var(--base-800)" }}>{c.name}</button>
+            ))}
+          </div>
+          <a href={waLink} target="_blank" rel="noopener noreferrer" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 999, background: "var(--success-500)", padding: "10px 16px", fontSize: 14, fontWeight: 500, color: "#fff" }}>
+            <Icon.WhatsApp style={{ width: 16, height: 16 }} /> Escríbenos por WhatsApp
+          </a>
+        </div>
+      )}
+    </header>
+  );
+}
+
+/* ============================================================
+   PRODUCT CARD
+   ============================================================ */
+function ProductCard({ product, onSelect }) {
+  const inStock = product.stock > 0;
+  const plans = product.plans || [];
+  const minPlan = plans.reduce((min, pl) => (!min || pl.price < min.price ? pl : min), null);
+  const singlePlan = plans.length === 1 ? plans[0] : null;
+  return (
+    <div className="card-hover" style={{ position: "relative", overflow: "hidden", borderRadius: 20, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", boxShadow: "0 10px 25px rgba(0,0,0,.3)" }}>
+      <div style={{ position: "relative", height: 160, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", background: "var(--base-700)" }}>
+        {product.image_url ? (
+          <img src={product.image_url} alt={product.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={(e) => { e.target.style.display = "none"; }} />
+        ) : (
+          <Icon.ImageOff style={{ width: 32, height: 32, color: "var(--base-600)" }} />
+        )}
+        <span style={{ position: "absolute", right: 8, top: 8, borderRadius: 999, padding: "4px 10px", fontSize: 12, fontWeight: 500, background: inStock ? "rgba(34,197,94,.2)" : "rgba(255,45,77,.2)", color: inStock ? "var(--success-500)" : "var(--signal-400)" }}>
+          {inStock ? "Disponible" : "Agotado"}
+        </span>
+      </div>
+      <div style={{ padding: 16 }}>
+        <h3 className="line-clamp-1" style={{ margin: "0 0 4px", fontSize: 16, fontWeight: 600 }}>{product.title}</h3>
+        {singlePlan ? (
+          <p style={{ margin: "0 0 12px", fontSize: 12, color: "#9ca3af" }}>{singlePlan.duration_label}</p>
+        ) : (
+          <div style={{ margin: "0 0 12px", display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {plans.map((pl) => (
+              <span key={pl.id} style={{ borderRadius: 999, padding: "2px 8px", fontSize: 11, background: "var(--base-700)", color: "#9ca3af" }}>{pl.duration_label}</span>
+            ))}
+          </div>
+        )}
+        <ul style={{ listStyle: "none", margin: "0 0 16px", padding: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+          {product.features.slice(0, 3).map((f, i) => (
+            <li key={i} style={{ display: "flex", alignItems: "flex-start", gap: 6, fontSize: 12, color: "#d1d5db" }}>
+              <Icon.Check style={{ width: 14, height: 14, marginTop: 1, flexShrink: 0, color: "var(--accent-400)" }} />
+              <span className="line-clamp-1">{f}</span>
+            </li>
+          ))}
+        </ul>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <span style={{ fontSize: 18, fontWeight: 700 }}>
+            {singlePlan ? `S/ ${singlePlan.price.toFixed(2)}` : `Desde S/ ${(minPlan?.price ?? 0).toFixed(2)}`}
+          </span>
+          <button disabled={!inStock} onClick={() => onSelect(product)} className={inStock ? "neon-red-hover" : ""}
+            style={{ borderRadius: 999, padding: "8px 16px", fontSize: 14, fontWeight: 500, border: "none", transition: "all .15s",
+              background: inStock ? "var(--signal-500)" : "var(--base-700)", color: inStock ? "#fff" : "#6b7280", cursor: inStock ? "pointer" : "not-allowed" }}>
+            {inStock ? "Comprar" : "Agotado"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   CATALOG GRID
+   ============================================================ */
+function CatalogGrid({ products, onSelect }) {
+  const [duration, setDuration] = useState("Todos");
+  const [maxPrice, setMaxPrice] = useState(200);
+  const [showFilters, setShowFilters] = useState(false);
+
+  // Las opciones de duración se arman con las que el admin realmente configuró
+  // en los productos, así el filtro nunca muestra duraciones que nadie ofrece.
+  const availableDurations = useMemo(() => {
+    const set = new Set();
+    products.forEach((p) => (p.plans || []).forEach((pl) => set.add(pl.duration_label)));
+    return ["Todos", ...Array.from(set)];
+  }, [products]);
+
+  const filtered = useMemo(() => products.filter((p) => {
+    const plans = p.plans || [];
+    const matchesDuration = duration === "Todos" || plans.some((pl) => pl.duration_label === duration);
+    const matchesPrice = plans.some((pl) => pl.price <= maxPrice);
+    return matchesDuration && matchesPrice;
+  }), [products, duration, maxPrice]);
+
+  const chipStyle = (active) => ({
+    borderRadius: 999, padding: "6px 12px", fontSize: 12, border: "none",
+    background: active ? "rgba(34,184,255,.2)" : "var(--base-700)",
+    color: active ? "var(--accent-400)" : "#9ca3af",
+  });
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <p style={{ fontSize: 14, color: "#9ca3af", margin: 0 }}>{filtered.length} productos encontrados</p>
+        <button onClick={() => setShowFilters((v) => !v)} style={{ display: "flex", alignItems: "center", gap: 8, borderRadius: 999, border: "1px solid var(--base-700)", background: "transparent", padding: "6px 12px", fontSize: 14, color: "#d1d5db" }}>
+          <Icon.Sliders style={{ width: 16, height: 16 }} /> Filtros
+        </button>
+      </div>
+
+      {showFilters && (
+        <div className="fade-in" style={{ marginBottom: 24, display: "grid", gridTemplateColumns: "1fr", gap: 16, borderRadius: 12, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 16 }}>
+          <div>
+            <label style={{ display: "block", marginBottom: 8, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Duración</label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {availableDurations.map((d) => <button key={d} onClick={() => setDuration(d)} style={chipStyle(duration === d)}>{d}</button>)}
+            </div>
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: 8, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Precio máximo: S/ {maxPrice}</label>
+            <input type="range" min="10" max="200" step="5" value={maxPrice} onChange={(e) => setMaxPrice(Number(e.target.value))} style={{ width: "100%", accentColor: "var(--accent-500)" }} />
+          </div>
+        </div>
+      )}
+
+      <div className="products-grid" style={{ display: "grid", gridTemplateColumns: "repeat(1,1fr)", gap: 20 }}>
+        {filtered.map((p) => <ProductCard key={p.id} product={p} onSelect={onSelect} />)}
+      </div>
+
+      {filtered.length === 0 && <div style={{ padding: "64px 0", textAlign: "center", color: "#6b7280" }}>No se encontraron productos con estos filtros.</div>}
+    </div>
+  );
+}
+
+/* ============================================================
+   CHECKOUT MODAL
+   ============================================================ */
+const PAYMENT_OPTIONS = [
+  { value: "yape", label: "Yape", icon: Icon.Smartphone },
+  { value: "plin", label: "Plin", icon: Icon.Smartphone },
+  { value: "transferencia", label: "Transferencia bancaria", icon: Icon.Bank },
+];
+
+function CheckoutModal({ product, settings, onClose, onCreateOrder }) {
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [payment, setPayment] = useState("yape");
+  const [selectedPlanId, setSelectedPlanId] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  // Cuando se abre el modal con un producto nuevo, preselecciona su primer plan.
+  useEffect(() => {
+    if (product && product.plans && product.plans.length > 0) {
+      setSelectedPlanId(product.plans[0].id);
+    } else {
+      setSelectedPlanId(null);
+    }
+  }, [product]);
+
+  if (!product) return null;
+
+  const plans = product.plans || [];
+  const selectedPlan = plans.find((pl) => pl.id === selectedPlanId) || plans[0];
+  const paymentLabel = PAYMENT_OPTIONS.find((p) => p.value === payment)?.label ?? payment;
+
+  function handleConfirm() {
+    if (!name.trim() || !phone.trim()) {
+      setError("Por favor completa tu nombre y número de WhatsApp.");
+      return;
+    }
+    if (!selectedPlan) {
+      setError("Este producto no tiene planes disponibles todavía.");
+      return;
+    }
+    setError(null);
+    setLoading(true);
+
+    setTimeout(() => {
+      onCreateOrder({
+        id: uid(), product_id: product.id, customer_name: name.trim(), customer_phone: phone.trim(),
+        payment_method: payment, plan_duration_label: selectedPlan.duration_label, price_at_order: selectedPlan.price, status: "pendiente",
+        notes: null, created_at: new Date().toISOString(),
+      });
+      setLoading(false);
+
+      const message = [
+        `Hola, deseo adquirir *${product.title}* (${selectedPlan.duration_label}) por S/ ${selectedPlan.price.toFixed(2)}.`,
+        `Método de pago: ${paymentLabel}.`,
+        `Mi nombre es ${name.trim()} y mi número es ${phone.trim()}.`,
+      ].join(" ");
+      const waUrl = `https://wa.me/${settings.whatsapp_number}?text=${encodeURIComponent(message)}`;
+      window.open(waUrl, "_blank");
+      onClose();
+    }, 400);
+  }
+
+  return (
+    <div className="fade-in" onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.7)", backdropFilter: "blur(4px)", padding: 16 }}>
+      <div className="slide-up" onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 420, borderRadius: 20, border: "1px solid var(--base-700)", background: "var(--base-900)", padding: 24, maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 16 }}>
+          <div>
+            <h2 style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 600 }}>{product.title}</h2>
+            {selectedPlan && <p style={{ margin: 0, fontSize: 14, color: "#9ca3af" }}>{selectedPlan.duration_label} · S/ {selectedPlan.price.toFixed(2)}</p>}
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#9ca3af", padding: 4, borderRadius: 999 }}><Icon.X style={{ width: 20, height: 20 }} /></button>
+        </div>
+
+        {plans.length > 1 && (
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: "block", marginBottom: 8, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Elige la duración</label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {plans.map((pl) => {
+                const active = pl.id === selectedPlanId;
+                return (
+                  <button key={pl.id} onClick={() => setSelectedPlanId(pl.id)}
+                    style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, borderRadius: 12, padding: "8px 14px", fontSize: 12,
+                      border: active ? "1px solid var(--accent-500)" : "1px solid var(--base-700)",
+                      background: active ? "rgba(34,184,255,.1)" : "transparent", color: active ? "var(--accent-400)" : "#9ca3af" }}>
+                    <span style={{ fontWeight: 600 }}>{pl.duration_label}</span>
+                    <span>S/ {pl.price.toFixed(2)}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        <label style={{ display: "block", marginBottom: 8, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Método de pago</label>
+        <div style={{ marginBottom: 16, display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+          {PAYMENT_OPTIONS.map((opt) => {
+            const IconC = opt.icon;
+            const active = payment === opt.value;
+            return (
+              <button key={opt.value} onClick={() => setPayment(opt.value)}
+                style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, borderRadius: 12, padding: 10, fontSize: 12,
+                  border: active ? "1px solid var(--accent-500)" : "1px solid var(--base-700)",
+                  background: active ? "rgba(34,184,255,.1)" : "transparent", color: active ? "var(--accent-400)" : "#9ca3af" }}>
+                <IconC style={{ width: 16, height: 16 }} />{opt.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <div style={{ marginBottom: 16, borderRadius: 12, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 12, fontSize: 14, color: "#d1d5db" }}>
+          {payment === "yape" && <p style={{ margin: 0 }}>Yapea a: <span style={{ fontWeight: 600, color: "#fff" }}>{settings.yape_number ?? "—"}</span></p>}
+          {payment === "plin" && <p style={{ margin: 0 }}>Plinea a: <span style={{ fontWeight: 600, color: "#fff" }}>{settings.plin_number ?? "—"}</span></p>}
+          {payment === "transferencia" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <p style={{ margin: 0 }}>BCP: <span style={{ fontWeight: 600, color: "#fff" }}>{settings.bank_bcp_account ?? "—"}</span></p>
+              <p style={{ margin: 0 }}>Interbank: <span style={{ fontWeight: 600, color: "#fff" }}>{settings.bank_interbank_account ?? "—"}</span></p>
+            </div>
+          )}
+        </div>
+
+        <div style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+          <div>
+            <label style={{ display: "block", marginBottom: 4, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Nombre</label>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Tu nombre completo"
+              style={{ width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 14, color: "#fff" }} />
+          </div>
+          <div>
+            <label style={{ display: "block", marginBottom: 4, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>WhatsApp</label>
+            <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+51 9XX XXX XXX"
+              style={{ width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 14, color: "#fff" }} />
+          </div>
+        </div>
+
+        {error && <p style={{ marginBottom: 12, fontSize: 12, color: "var(--signal-400)" }}>{error}</p>}
+
+        <button onClick={handleConfirm} disabled={loading || !selectedPlan}
+          style={{ display: "flex", width: "100%", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 999, background: "var(--success-500)", padding: "12px", fontSize: 14, fontWeight: 600, color: "#fff", border: "none", opacity: loading ? 0.6 : 1 }}>
+          {loading && <Icon.Loader className="spin" style={{ width: 16, height: 16 }} />}
+          Confirmar por WhatsApp
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   TIENDA PÚBLICA
+   ============================================================ */
+function StorePage({ db, setDb }) {
+  const [search, setSearch] = useState("");
+  const [activeCategory, setActiveCategory] = useState(null);
+  const [selectedProduct, setSelectedProduct] = useState(null);
+
+  const activeProducts = useMemo(() => db.products.filter((p) => p.is_active), [db.products]);
+
+  const filteredProducts = useMemo(() => activeProducts.filter((p) => {
+    const matchesSearch = p.title.toLowerCase().includes(search.toLowerCase());
+    const matchesCategory = !activeCategory || db.categories.find((c) => c.id === p.category_id)?.slug === activeCategory;
+    return matchesSearch && matchesCategory;
+  }), [activeProducts, db.categories, search, activeCategory]);
+
+  function handleCreateOrder(order) {
+    setDb((prev) => {
+      const next = { ...prev, orders: [order, ...prev.orders] };
+      saveDB(next);
+      return next;
+    });
+  }
+
+  return (
+    <div style={{ minHeight: "100vh" }}>
+      <Header categories={db.categories} search={search} onSearchChange={setSearch} activeCategory={activeCategory} onCategoryChange={setActiveCategory} whatsappNumber={db.settings.whatsapp_number} />
+      <main style={{ maxWidth: 1280, margin: "0 auto", padding: "32px 16px" }}>
+        <section style={{ marginBottom: 40, textAlign: "center" }}>
+          <h1 style={{ margin: "0 0 8px", fontSize: 30, fontWeight: 700, color: "#fff" }}>Productos y suscripciones digitales</h1>
+          <p style={{ margin: 0, color: "#9ca3af" }}>Membresías, cursos, licencias y plantillas — pago fácil con Yape, Plin o transferencia.</p>
+        </section>
+        <CatalogGrid products={filteredProducts} onSelect={setSelectedProduct} />
+      </main>
+      <footer style={{ borderTop: "1px solid var(--base-700)", padding: "24px 16px", textAlign: "center", color: "#6b7280", fontSize: 12 }}>
+        <p style={{ margin: 0 }}>DigitalStore Perú — Demo local (sin backend). <a href="#/admin" style={{ color: "var(--accent-400)" }}>Panel admin</a></p>
+      </footer>
+      <CheckoutModal product={selectedProduct} settings={db.settings} onClose={() => setSelectedProduct(null)} onCreateOrder={handleCreateOrder} />
+    </div>
+  );
+}
+
+/* ============================================================
+   ADMIN — LOGIN
+   ============================================================ */
+function AdminLogin({ db, onLoggedIn }) {
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (password === db.adminPassword) {
+      sessionStorage.setItem("digitalstore_admin_session", "1");
+      onLoggedIn();
+    } else {
+      setError("Contraseña incorrecta.");
+    }
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <form onSubmit={handleSubmit} style={{ width: "100%", maxWidth: 360, borderRadius: 20, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 32 }}>
+        <div style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}>
+          <div style={{ width: 48, height: 48, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(34,184,255,.15)" }}>
+            <Icon.Lock style={{ width: 22, height: 22, color: "var(--accent-400)" }} />
+          </div>
+        </div>
+        <h1 style={{ margin: "0 0 4px", fontSize: 20, fontWeight: 600, textAlign: "center" }}>Panel Admin</h1>
+        <p style={{ margin: "0 0 24px", fontSize: 13, color: "#9ca3af", textAlign: "center" }}>DigitalStore Perú</p>
+        <label style={{ display: "block", marginBottom: 6, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Contraseña</label>
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" autoFocus
+          style={{ width: "100%", marginBottom: 8, borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "10px 12px", fontSize: 14, color: "#fff" }} />
+        {error && <p style={{ margin: "0 0 12px", fontSize: 12, color: "var(--signal-400)" }}>{error}</p>}
+        <p style={{ margin: "8px 0 16px", fontSize: 11, color: "#6b7280" }}>Contraseña por defecto: <code>{DEFAULT_ADMIN_PASSWORD}</code> (cámbiala luego en Configuración).</p>
+        <button type="submit" style={{ width: "100%", borderRadius: 999, border: "none", background: "var(--accent-500)", padding: "10px", fontSize: 14, fontWeight: 600, color: "#05060a" }}>Ingresar</button>
+        <div style={{ textAlign: "center", marginTop: 16 }}><a href="#/" style={{ fontSize: 12, color: "#6b7280" }}>← Volver a la tienda</a></div>
+      </form>
+    </div>
+  );
+}
+
+/* ============================================================
+   ADMIN — SIDEBAR + SHELL
+   ============================================================ */
+function AdminSidebar({ section, onNavigate, onLogout }) {
+  const items = [
+    { key: "dashboard", label: "Dashboard", icon: Icon.Grid },
+    { key: "products", label: "Productos", icon: Icon.Box },
+    { key: "orders", label: "Órdenes", icon: Icon.List },
+    { key: "settings", label: "Configuración", icon: Icon.Settings },
+  ];
+  return (
+    <aside style={{ width: 220, flexShrink: 0, borderRight: "1px solid var(--base-700)", background: "var(--base-900)", minHeight: "100vh", padding: 16, display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 24, padding: "0 4px" }}>
+        <div style={{ width: 32, height: 32, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14, background: "linear-gradient(135deg, var(--accent-500), var(--signal-500))" }}>D</div>
+        <span style={{ fontWeight: 600, fontSize: 15 }}>Admin</span>
+      </div>
+      <nav style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+        {items.map((it) => {
+          const IconC = it.icon; const active = section === it.key;
+          return (
+            <button key={it.key} onClick={() => onNavigate(it.key)}
+              style={{ display: "flex", alignItems: "center", gap: 10, borderRadius: 10, border: "none", padding: "10px 12px", fontSize: 14, textAlign: "left",
+                background: active ? "rgba(34,184,255,.15)" : "transparent", color: active ? "var(--accent-400)" : "#9ca3af" }}>
+              <IconC style={{ width: 16, height: 16 }} />{it.label}
+            </button>
+          );
+        })}
+      </nav>
+      <button onClick={onLogout} style={{ display: "flex", alignItems: "center", gap: 10, borderRadius: 10, border: "none", padding: "10px 12px", fontSize: 14, background: "transparent", color: "var(--signal-400)" }}>
+        <Icon.LogOut style={{ width: 16, height: 16 }} /> Cerrar sesión
+      </button>
+      <div style={{ marginTop: 12 }}><a href="#/" style={{ fontSize: 12, color: "#6b7280" }}>← Ver tienda</a></div>
+    </aside>
+  );
+}
+
+function StatCard({ label, value, accent }) {
+  return (
+    <div style={{ borderRadius: 16, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 20 }}>
+      <p style={{ margin: "0 0 8px", fontSize: 12, color: "#9ca3af" }}>{label}</p>
+      <p style={{ margin: 0, fontSize: 26, fontWeight: 700, color: accent || "#fff" }}>{value}</p>
+    </div>
+  );
+}
+
+function AdminDashboard({ db }) {
+  const totalOrders = db.orders.length;
+  const pending = db.orders.filter((o) => o.status === "pendiente").length;
+  const paid = db.orders.filter((o) => o.status === "pagado" || o.status === "entregado").length;
+  const revenue = db.orders.filter((o) => o.status === "pagado" || o.status === "entregado").reduce((s, o) => s + o.price_at_order, 0);
+
+  return (
+    <div>
+      <h1 style={{ margin: "0 0 20px", fontSize: 22, fontWeight: 700 }}>Dashboard</h1>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 16, marginBottom: 32 }}>
+        <StatCard label="Órdenes totales" value={totalOrders} />
+        <StatCard label="Pendientes" value={pending} accent="var(--accent-400)" />
+        <StatCard label="Pagadas / entregadas" value={paid} accent="var(--success-500)" />
+        <StatCard label="Ingresos confirmados" value={`S/ ${revenue.toFixed(2)}`} accent="var(--signal-400)" />
+      </div>
+      <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Últimas órdenes</h2>
+      <OrdersTable db={db} orders={db.orders.slice(0, 5)} compact />
+    </div>
+  );
+}
+
+const STATUS_STYLES = {
+  pendiente: { bg: "rgba(34,184,255,.15)", color: "var(--accent-400)" },
+  pagado: { bg: "rgba(34,197,94,.15)", color: "var(--success-500)" },
+  entregado: { bg: "rgba(34,197,94,.3)", color: "var(--success-500)" },
+  cancelado: { bg: "rgba(255,45,77,.15)", color: "var(--signal-400)" },
+};
+
+function OrdersTable({ db, orders, onChangeStatus, compact }) {
+  return (
+    <div style={{ overflowX: "auto", borderRadius: 12, border: "1px solid var(--base-700)" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <thead>
+          <tr style={{ background: "var(--base-800)", textAlign: "left" }}>
+            <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Producto</th>
+            <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Cliente</th>
+            <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Pago</th>
+            <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Precio</th>
+            <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Estado</th>
+          </tr>
+        </thead>
+        <tbody>
+          {orders.map((o) => {
+            const product = db.products.find((p) => p.id === o.product_id);
+            const s = STATUS_STYLES[o.status] || STATUS_STYLES.pendiente;
+            return (
+              <tr key={o.id} style={{ borderTop: "1px solid var(--base-700)" }}>
+                <td style={{ padding: "10px 12px" }}>{product ? product.title : "—"}{o.plan_duration_label && <><br /><span style={{ color: "#6b7280", fontSize: 11 }}>{o.plan_duration_label}</span></>}</td>
+                <td style={{ padding: "10px 12px" }}>{o.customer_name}<br /><span style={{ color: "#6b7280", fontSize: 11 }}>{o.customer_phone}</span></td>
+                <td style={{ padding: "10px 12px", textTransform: "capitalize" }}>{o.payment_method}</td>
+                <td style={{ padding: "10px 12px" }}>S/ {o.price_at_order.toFixed(2)}</td>
+                <td style={{ padding: "10px 12px" }}>
+                  {compact || !onChangeStatus ? (
+                    <span style={{ borderRadius: 999, padding: "4px 10px", fontSize: 11, background: s.bg, color: s.color }}>{o.status}</span>
+                  ) : (
+                    <select value={o.status} onChange={(e) => onChangeStatus(o.id, e.target.value)}
+                      style={{ borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", color: "#fff", padding: "4px 8px", fontSize: 12 }}>
+                      <option value="pendiente">pendiente</option>
+                      <option value="pagado">pagado</option>
+                      <option value="entregado">entregado</option>
+                      <option value="cancelado">cancelado</option>
+                    </select>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+          {orders.length === 0 && (
+            <tr><td colSpan="5" style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>Sin órdenes todavía.</td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function AdminOrders({ db, setDb }) {
+  function handleChangeStatus(orderId, status) {
+    setDb((prev) => {
+      const next = { ...prev, orders: prev.orders.map((o) => (o.id === orderId ? { ...o, status } : o)) };
+      saveDB(next);
+      return next;
+    });
+  }
+  return (
+    <div>
+      <h1 style={{ margin: "0 0 20px", fontSize: 22, fontWeight: 700 }}>Órdenes</h1>
+      <OrdersTable db={db} orders={db.orders} onChangeStatus={handleChangeStatus} />
+    </div>
+  );
+}
+
+const emptyProductForm = { title: "", stock: "0", category_id: "", image_url: "", features: "", is_active: true, plans: [{ id: uid(), duration_label: "1 mes", price: "" }] };
+
+/* Lee un archivo de imagen, lo redimensiona (máx 800px de ancho) y lo comprime
+   a JPEG para que quepa cómodamente en localStorage como data URL. */
+function compressImageToDataURL(file, maxWidth = 800, quality = 0.8) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("read error"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("image error"));
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function AdminProducts({ db, setDb }) {
+  const [editing, setEditing] = useState(null); // product id or "new" or null
+  const [form, setForm] = useState(emptyProductForm);
+  const [imgError, setImgError] = useState(null);
+
+  function startNew() { setForm(emptyProductForm); setImgError(null); setEditing("new"); }
+  function startEdit(p) {
+    setForm({
+      title: p.title, stock: String(p.stock), category_id: p.category_id || "", image_url: p.image_url || "",
+      features: p.features.join(", "), is_active: p.is_active,
+      plans: (p.plans || []).map((pl) => ({ id: pl.id, duration_label: pl.duration_label, price: String(pl.price) })),
+    });
+    setImgError(null);
+    setEditing(p.id);
+  }
+  function cancel() { setEditing(null); setForm(emptyProductForm); setImgError(null); }
+
+  function addPlan() {
+    setForm((f) => ({ ...f, plans: [...f.plans, { id: uid(), duration_label: "1 mes", price: "" }] }));
+  }
+  function updatePlan(id, patch) {
+    setForm((f) => ({ ...f, plans: f.plans.map((pl) => pl.id === id ? { ...pl, ...patch } : pl) }));
+  }
+  function removePlan(id) {
+    setForm((f) => ({ ...f, plans: f.plans.filter((pl) => pl.id !== id) }));
+  }
+
+  const validPlans = form.plans.filter((pl) => pl.duration_label.trim() && pl.price !== "");
+
+  function save() {
+    if (!form.title.trim() || validPlans.length === 0) return;
+    const featuresArr = form.features.split(",").map((s) => s.trim()).filter(Boolean);
+    const plansArr = validPlans.map((pl) => ({ id: pl.id, duration_label: pl.duration_label.trim(), price: parseFloat(pl.price) || 0 }));
+    setDb((prev) => {
+      let products;
+      if (editing === "new") {
+        const newProduct = {
+          id: uid(), title: form.title.trim(), slug: form.title.trim().toLowerCase().replace(/\s+/g, "-"),
+          category_id: form.category_id || null, description: "", image_url: form.image_url || null,
+          stock: parseInt(form.stock) || 0, is_active: form.is_active, features: featuresArr, plans: plansArr,
+        };
+        products = [newProduct, ...prev.products];
+      } else {
+        products = prev.products.map((p) => p.id === editing ? {
+          ...p, title: form.title.trim(), category_id: form.category_id || null, image_url: form.image_url || null,
+          stock: parseInt(form.stock) || 0, is_active: form.is_active, features: featuresArr, plans: plansArr,
+        } : p);
+      }
+      const next = { ...prev, products };
+      saveDB(next);
+      return next;
+    });
+    cancel();
+  }
+
+  function remove(id) {
+    if (!confirm("¿Eliminar este producto?")) return;
+    setDb((prev) => {
+      const next = { ...prev, products: prev.products.filter((p) => p.id !== id) };
+      saveDB(next);
+      return next;
+    });
+  }
+
+  function toggleActive(id) {
+    setDb((prev) => {
+      const next = { ...prev, products: prev.products.map((p) => p.id === id ? { ...p, is_active: !p.is_active } : p) };
+      saveDB(next);
+      return next;
+    });
+  }
+
+  const inputStyle = { width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 13, color: "#fff" };
+  const labelStyle = { display: "block", marginBottom: 4, fontSize: 12, color: "#9ca3af" };
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>Productos</h1>
+        <button onClick={startNew} style={{ display: "flex", alignItems: "center", gap: 6, borderRadius: 999, border: "none", background: "var(--accent-500)", color: "#05060a", padding: "8px 14px", fontSize: 13, fontWeight: 600 }}>
+          <Icon.Plus style={{ width: 14, height: 14 }} /> Nuevo producto
+        </button>
+      </div>
+
+      {editing && (
+        <div className="fade-in" style={{ marginBottom: 24, borderRadius: 16, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 20 }}>
+          <h2 style={{ marginTop: 0, fontSize: 15, fontWeight: 600 }}>{editing === "new" ? "Nuevo producto" : "Editar producto"}</h2>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 12, marginBottom: 12 }}>
+            <div><label style={labelStyle}>Título</label><input style={inputStyle} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></div>
+            <div><label style={labelStyle}>Stock</label><input type="number" style={inputStyle} value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} /></div>
+            <div>
+              <label style={labelStyle}>Categoría</label>
+              <select style={inputStyle} value={form.category_id} onChange={(e) => setForm({ ...form, category_id: e.target.value })}>
+                <option value="">Sin categoría</option>
+                {db.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={labelStyle}>Imagen del producto</label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => {
+                  const file = e.target.files && e.target.files[0];
+                  if (!file) return;
+                  setImgError(null);
+                  compressImageToDataURL(file)
+                    .then((dataUrl) => setForm((f) => ({ ...f, image_url: dataUrl })))
+                    .catch(() => setImgError("No se pudo leer la imagen. Intenta con otro archivo."));
+                }}
+                style={{ ...inputStyle, padding: "6px 8px", cursor: "pointer" }}
+              />
+              {imgError && <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--signal-400)" }}>{imgError}</p>}
+            </div>
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            <label style={labelStyle}>Planes de duración y precio</label>
+            <p style={{ margin: "0 0 8px", fontSize: 11, color: "#6b7280" }}>Elige tú qué duraciones ofrecer para este producto (1 mes, 2 meses, 3 meses, por año, etc.). No hace falta agregar todas — solo las que apliquen.</p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {form.plans.map((pl) => {
+                const isPreset = DURATION_PRESETS.includes(pl.duration_label);
+                return (
+                  <div key={pl.id} style={{ display: "grid", gridTemplateColumns: isPreset ? "1fr 1fr auto" : "1fr 1fr 1fr auto", gap: 8, alignItems: "center" }}>
+                    <select style={inputStyle} value={isPreset ? pl.duration_label : "custom"}
+                      onChange={(e) => updatePlan(pl.id, { duration_label: e.target.value === "custom" ? "" : e.target.value })}>
+                      {DURATION_PRESETS.map((d) => <option key={d} value={d}>{d}</option>)}
+                      <option value="custom">Personalizada…</option>
+                    </select>
+                    {!isPreset && (
+                      <input style={inputStyle} placeholder="Ej: 2 meses" value={pl.duration_label} onChange={(e) => updatePlan(pl.id, { duration_label: e.target.value })} />
+                    )}
+                    <input type="number" style={inputStyle} placeholder="Precio (S/)" value={pl.price} onChange={(e) => updatePlan(pl.id, { price: e.target.value })} />
+                    <button type="button" onClick={() => removePlan(pl.id)} style={{ background: "none", border: "none", color: "var(--signal-400)", padding: 4 }}><Icon.Trash style={{ width: 15, height: 15 }} /></button>
+                  </div>
+                );
+              })}
+            </div>
+            <button type="button" onClick={addPlan} style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, borderRadius: 999, border: "1px solid var(--base-700)", background: "transparent", color: "var(--accent-400)", padding: "6px 12px", fontSize: 12 }}>
+              <Icon.Plus style={{ width: 12, height: 12 }} /> Agregar plan
+            </button>
+            {form.plans.length > 0 && validPlans.length === 0 && (
+              <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--signal-400)" }}>Agrega al menos un plan con duración y precio válidos.</p>
+            )}
+          </div>
+
+          {form.image_url && (
+            <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 12 }}>
+              <img src={form.image_url} alt="Vista previa" style={{ width: 80, height: 60, objectFit: "cover", borderRadius: 8, border: "1px solid var(--base-700)" }} />
+              <button type="button" onClick={() => setForm((f) => ({ ...f, image_url: "" }))} style={{ background: "none", border: "1px solid var(--base-700)", color: "#9ca3af", borderRadius: 999, padding: "4px 12px", fontSize: 12 }}>Quitar imagen</button>
+            </div>
+          )}
+          <div style={{ marginBottom: 12 }}>
+            <label style={labelStyle}>Características (separadas por coma)</label>
+            <input style={inputStyle} value={form.features} onChange={(e) => setForm({ ...form, features: e.target.value })} placeholder="Ej: Acceso ilimitado, Soporte 24/7" />
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#d1d5db", marginBottom: 16 }}>
+            <input type="checkbox" checked={form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} /> Activo (visible en la tienda)
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={save} disabled={!form.title.trim() || validPlans.length === 0} style={{ borderRadius: 999, border: "none", background: "var(--success-500)", color: "#fff", padding: "8px 16px", fontSize: 13, fontWeight: 600, opacity: (!form.title.trim() || validPlans.length === 0) ? 0.5 : 1, cursor: (!form.title.trim() || validPlans.length === 0) ? "not-allowed" : "pointer" }}>Guardar</button>
+            <button onClick={cancel} style={{ borderRadius: 999, border: "1px solid var(--base-700)", background: "transparent", color: "#9ca3af", padding: "8px 16px", fontSize: 13 }}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ overflowX: "auto", borderRadius: 12, border: "1px solid var(--base-700)" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr style={{ background: "var(--base-800)", textAlign: "left" }}>
+              <th style={{ padding: "10px 12px", color: "#9ca3af", fontWeight: 500 }}>Producto</th>
+              <th style={{ padding: "10px 12px", color: "#9ca3af", fontWeight: 500 }}>Precio</th>
+              <th style={{ padding: "10px 12px", color: "#9ca3af", fontWeight: 500 }}>Stock</th>
+              <th style={{ padding: "10px 12px", color: "#9ca3af", fontWeight: 500 }}>Estado</th>
+              <th style={{ padding: "10px 12px", color: "#9ca3af", fontWeight: 500 }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {db.products.map((p) => (
+              <tr key={p.id} style={{ borderTop: "1px solid var(--base-700)" }}>
+                <td style={{ padding: "10px 12px" }}>{p.title}<br /><span style={{ color: "#6b7280", fontSize: 11 }}>{(p.plans || []).map((pl) => pl.duration_label).join(" · ")}</span></td>
+                <td style={{ padding: "10px 12px" }}>
+                  {(p.plans || []).map((pl) => (
+                    <div key={pl.id} style={{ whiteSpace: "nowrap" }}>S/ {pl.price.toFixed(2)} <span style={{ color: "#6b7280", fontSize: 11 }}>({pl.duration_label})</span></div>
+                  ))}
+                </td>
+                <td style={{ padding: "10px 12px" }}>{p.stock}</td>
+                <td style={{ padding: "10px 12px" }}>
+                  <button onClick={() => toggleActive(p.id)} style={{ borderRadius: 999, border: "none", padding: "4px 10px", fontSize: 11, cursor: "pointer",
+                    background: p.is_active ? "rgba(34,197,94,.15)" : "rgba(255,45,77,.15)", color: p.is_active ? "var(--success-500)" : "var(--signal-400)" }}>
+                    {p.is_active ? "activo" : "pausado"}
+                  </button>
+                </td>
+                <td style={{ padding: "10px 12px", whiteSpace: "nowrap" }}>
+                  <button onClick={() => startEdit(p)} style={{ background: "none", border: "none", color: "var(--accent-400)", marginRight: 8, padding: 4 }}><Icon.Edit style={{ width: 15, height: 15 }} /></button>
+                  <button onClick={() => remove(p.id)} style={{ background: "none", border: "none", color: "var(--signal-400)", padding: 4 }}><Icon.Trash style={{ width: 15, height: 15 }} /></button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function AdminSettings({ db, setDb }) {
+  const [form, setForm] = useState(db.settings);
+  const [newPassword, setNewPassword] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  function save() {
+    setDb((prev) => {
+      const next = { ...prev, settings: { ...form }, adminPassword: newPassword.trim() ? newPassword.trim() : prev.adminPassword };
+      saveDB(next);
+      return next;
+    });
+    setNewPassword("");
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  }
+
+  const inputStyle = { width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 13, color: "#fff" };
+  const labelStyle = { display: "block", marginBottom: 4, fontSize: 12, color: "#9ca3af" };
+
+  return (
+    <div style={{ maxWidth: 560 }}>
+      <h1 style={{ margin: "0 0 20px", fontSize: 22, fontWeight: 700 }}>Configuración</h1>
+      <div style={{ marginBottom: 20, borderRadius: 12, border: "1px solid var(--base-700)", background: cloudSyncEnabled ? "rgba(34,197,94,.08)" : "rgba(255,45,77,.08)", padding: 12, fontSize: 12, color: cloudSyncEnabled ? "var(--success-500)" : "var(--signal-400)" }}>
+        {cloudSyncEnabled
+          ? "☁️ Sincronización en la nube activada: los cambios se ven al instante en todos los dispositivos."
+          : "⚠️ Sincronización en la nube NO configurada: los cambios solo se guardan en este navegador. Revisa las instrucciones en el código (firebaseConfig) para activarla."}
+      </div>
+      <div style={{ borderRadius: 16, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 20, display: "flex", flexDirection: "column", gap: 12 }}>
+        <div><label style={labelStyle}>Número de WhatsApp (con código de país, sin +)</label><input style={inputStyle} value={form.whatsapp_number} onChange={(e) => setForm({ ...form, whatsapp_number: e.target.value })} /></div>
+        <div><label style={labelStyle}>Número Yape</label><input style={inputStyle} value={form.yape_number || ""} onChange={(e) => setForm({ ...form, yape_number: e.target.value })} /></div>
+        <div><label style={labelStyle}>Número Plin</label><input style={inputStyle} value={form.plin_number || ""} onChange={(e) => setForm({ ...form, plin_number: e.target.value })} /></div>
+        <div><label style={labelStyle}>Cuenta BCP</label><input style={inputStyle} value={form.bank_bcp_account || ""} onChange={(e) => setForm({ ...form, bank_bcp_account: e.target.value })} /></div>
+        <div><label style={labelStyle}>Cuenta Interbank</label><input style={inputStyle} value={form.bank_interbank_account || ""} onChange={(e) => setForm({ ...form, bank_interbank_account: e.target.value })} /></div>
+        <hr style={{ border: "none", borderTop: "1px solid var(--base-700)", margin: "8px 0" }} />
+        <div><label style={labelStyle}>Nueva contraseña de admin (opcional)</label><input type="password" style={inputStyle} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Dejar en blanco para no cambiar" /></div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
+          <button onClick={save} style={{ borderRadius: 999, border: "none", background: "var(--success-500)", color: "#fff", padding: "8px 20px", fontSize: 13, fontWeight: 600 }}>Guardar cambios</button>
+          {saved && <span style={{ fontSize: 12, color: "var(--success-500)" }}>✓ Guardado</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminShell({ db, setDb }) {
+  const [section, setSection] = useState("dashboard");
+  const [loggedIn, setLoggedIn] = useState(sessionStorage.getItem("digitalstore_admin_session") === "1");
+
+  function logout() { sessionStorage.removeItem("digitalstore_admin_session"); setLoggedIn(false); }
+
+  if (!loggedIn) return <AdminLogin db={db} onLoggedIn={() => setLoggedIn(true)} />;
+
+  return (
+    <div style={{ display: "flex", minHeight: "100vh" }}>
+      <AdminSidebar section={section} onNavigate={setSection} onLogout={logout} />
+      <div style={{ flex: 1, padding: 32, overflowX: "auto" }}>
+        {section === "dashboard" && <AdminDashboard db={db} />}
+        {section === "products" && <AdminProducts db={db} setDb={setDb} />}
+        {section === "orders" && <AdminOrders db={db} setDb={setDb} />}
+        {section === "settings" && <AdminSettings db={db} setDb={setDb} />}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   APP ROOT — router simple con hash (#/  y  #/admin)
+   ============================================================ */
+function App() {
+  const [db, setDb] = useState(loadDB);
+  const [route, setRoute] = useState(window.location.hash || "#/");
+
+  useEffect(() => {
+    const onHashChange = () => setRoute(window.location.hash || "#/");
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  // Escucha en tiempo real: si tú (u otra persona) cambia algo desde
+  // cualquier dispositivo, todos los que tengan la tienda abierta
+  // reciben la actualización automáticamente, sin recargar la página.
+  useEffect(() => {
+    const unsubscribe = subscribeToCloud((freshDb) => setDb(freshDb));
+    return unsubscribe;
+  }, []);
+
+  if (route.startsWith("#/admin")) return <AdminShell db={db} setDb={setDb} />;
+  return <StorePage db={db} setDb={setDb} />;
+}
+
+/* Responsive helpers vía JS (media queries simples sin build step) */
+function applyResponsiveStyles() {
+  const styleTag = document.createElement("style");
+  styleTag.textContent = `
+    @media (min-width: 768px) {
+      .desktop-search { display: block !important; }
+      .desktop-wa { display: flex !important; }
+      .mobile-panel { display: none !important; }
+    }
+    @media (min-width: 1024px) {
+      .desktop-nav { display: flex !important; }
+    }
+    @media (max-width: 767px) {
+      .mobile-toggle { display: block !important; }
+    }
+    @media (min-width: 768px) {
+      .mobile-toggle { display: none !important; }
+    }
+    @media (min-width: 640px) {
+      .products-grid { grid-template-columns: repeat(2,1fr) !important; }
+    }
+    @media (min-width: 1024px) {
+      .products-grid { grid-template-columns: repeat(3,1fr) !important; }
+    }
+    @media (min-width: 1280px) {
+      .products-grid { grid-template-columns: repeat(4,1fr) !important; }
+    }
+  `;
+  document.head.appendChild(styleTag);
+}
+applyResponsiveStyles();
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
