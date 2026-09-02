@@ -11,6 +11,7 @@
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-storage-compat.js"></script>
 <style>
   :root{
     --base-950:#05060a; --base-900:#0b0e17; --base-800:#121623; --base-700:#1a1f2e; --base-600:#232939;
@@ -30,6 +31,9 @@
   a{color:inherit; text-decoration:none;}
   button{font-family:inherit; cursor:pointer;}
   input[type=text],input[type=tel],input[type=number],input[type=password]{font-family:inherit;}
+  select{ color-scheme: dark; }
+  select, option{ background-color:#121623; color:#fff; }
+  select option{ background-color:#1a1f2e; color:#fff; }
   .line-clamp-1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .neon-hover:hover{box-shadow:0 0 20px rgba(34,184,255,.35);}
   .neon-red-hover:hover{box-shadow:0 0 20px rgba(255,45,77,.35);}
@@ -47,9 +51,38 @@
 </head>
 <body>
 <div id="root"></div>
+<script>
+/* Red de seguridad global: si algo truena ANTES de que React/Firebase
+   terminen de cargar (ej. un script bloqueado, un error de red, etc.),
+   esto muestra el error real en vez de dejar la pantalla en negro sin
+   ninguna pista de qué pasó. */
+window.addEventListener("error", function (e) {
+  showFatalErrorBanner(e.error ? (e.error.stack || e.error.message) : e.message);
+});
+window.addEventListener("unhandledrejection", function (e) {
+  showFatalErrorBanner(e.reason ? (e.reason.stack || e.reason.message || String(e.reason)) : "Error desconocido");
+});
+function showFatalErrorBanner(detail) {
+  if (document.getElementById("fatal-error-banner")) return;
+  var root = document.getElementById("root");
+  if (root && root.children.length > 0) return; // React ya montó algo, no interferir
+  var div = document.createElement("div");
+  div.id = "fatal-error-banner";
+  div.style.cssText = "position:fixed;inset:0;background:#05060a;color:#fff;display:flex;align-items:center;justify-content:center;padding:24px;font-family:sans-serif;z-index:99999;";
+  div.innerHTML = '<div style="max-width:480px;text-align:center;">' +
+    '<div style="font-size:40px;margin-bottom:12px;">⚠️</div>' +
+    '<h1 style="font-size:18px;margin:0 0 8px;">La tienda no pudo cargar</h1>' +
+    '<p style="color:#9ca3af;font-size:13px;margin-bottom:16px;">Detalle técnico:</p>' +
+    '<pre style="text-align:left;background:#121623;border:1px solid #1a1f2e;border-radius:8px;padding:12px;font-size:11px;overflow-x:auto;color:#ff5470;white-space:pre-wrap;word-break:break-word;">' +
+    String(detail || "").replace(/</g, "&lt;") + '</pre>' +
+    '<button onclick="location.reload()" style="margin-top:16px;background:#22b8ff;color:#000;border:none;border-radius:8px;padding:10px 20px;font-weight:700;cursor:pointer;">Recargar página</button>' +
+    '</div>';
+  document.body.appendChild(div);
+}
+</script>
 
 <script type="text/babel">
-const { useState, useEffect, useMemo, useCallback } = React;
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
 
 /* ============================================================
    DATOS SEMILLA (equivalentes a sql/schema.sql) — persistidos
@@ -63,11 +96,22 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-" + Math.random
 const DURATION_PRESETS = ["1 mes", "2 meses", "3 meses", "6 meses", "12 meses / 1 año"];
 const plan = (duration_label, price) => ({ id: uid(), duration_label, price });
 
+/* Estas categorías son solo el "arranque" de una tienda nueva (primera vez que
+   se abre, sin datos aún en la nube). Desde el Panel Admin → pestaña
+   "Categorías" el admin puede crear, editar o eliminar las que quiera:
+   esto ya NO es una lista fija, es solo el valor inicial. */
 const SEED_CATEGORIES = [
-  { id: "cat-membresias", name: "Membresías", slug: "membresias" },
-  { id: "cat-cursos", name: "Cursos Online", slug: "cursos-online" },
-  { id: "cat-software", name: "Software y Licencias", slug: "software-licencias" },
-  { id: "cat-plantillas", name: "Plantillas Digitales", slug: "plantillas-digitales" },
+  { id: "cat-membresias", name: "Membresías", slug: "membresias", icon: "💪" },
+  { id: "cat-cursos", name: "Cursos Online", slug: "cursos-online", icon: "🎓" },
+  { id: "cat-software", name: "Software y Licencias", slug: "software-licencias", icon: "💻" },
+  { id: "cat-plantillas", name: "Plantillas Digitales", slug: "plantillas-digitales", icon: "🎨" },
+];
+
+/* Preguntas frecuentes iniciales — también 100% editables desde el Admin. */
+const SEED_FAQS = [
+  { id: uid(), question: "¿Cómo recibo mi producto después de pagar?", answer: "Apenas confirmamos tu pago, te enviamos el acceso, la licencia o el enlace de descarga directamente por WhatsApp.", order: 1 },
+  { id: uid(), question: "¿Qué métodos de pago aceptan?", answer: "Aceptamos Yape y transferencia/depósito bancario a BCP.", order: 2 },
+  { id: uid(), question: "¿Los productos digitales tienen garantía?", answer: "Sí, si algo no funciona correctamente contáctanos por WhatsApp y lo resolvemos o te reembolsamos.", order: 3 },
 ];
 
 const SEED_PRODUCTS = [
@@ -124,13 +168,27 @@ const DEFAULT_SETTINGS = {
   whatsapp_number: "51999999999",
   yape_number: "999 999 999",
   yape_qr_url: null,
-  plin_number: "999 999 999",
-  plin_qr_url: null,
   bank_bcp_account: "191-1234567-0-12",
   bank_interbank_account: "898-1234567890",
+  bank_qr_url: null,
+  /* Banner promocional (settings/announcements) — 100% editable desde Admin. */
+  announcement: { text: "", bg_color: "#0090e0", link: "", active: false },
+  /* Sincronización con Google Sheets (ver bloque más abajo para instrucciones
+     completas de cómo obtener estas dos URLs). Mientras estén vacías, la
+     tienda funciona igual que antes (catálogo manual desde el Admin, pedidos
+     solo guardados en Firestore). */
+  sheet_csv_url: "",
+  sheet_coupons_csv_url: "",
+  sheet_orders_webhook_url: "",
 };
 
 const DEFAULT_ADMIN_PASSWORD = "admin123";
+
+/* Ruta "secreta" del panel admin: en vez de la típica "#/admin" que cualquiera
+   adivina, usamos algo más largo y arbitrario. Cámbiala por lo que quieras
+   (solo letras, números y guiones) y luego entra escribiendo esa dirección
+   directamente en el navegador, ej: tudominio.com/#/panel-x9k2m7 */
+const ADMIN_ROUTE = "#/panel-x9k2m7";
 
 /* ============================================================
    "BASE DE DATOS" LOCAL — localStorage helpers
@@ -179,14 +237,54 @@ const FIRESTORE_COLLECTION = "digitalstore";
 const FIRESTORE_DOC = "main";
 
 let firestoreDB = null;
+let firebaseStorage = null;
 const cloudSyncEnabled = !!firebaseConfig.apiKey;
 if (cloudSyncEnabled) {
   try {
     firebase.initializeApp(firebaseConfig);
     firestoreDB = firebase.firestore();
+    try { firebaseStorage = firebase.storage(); } catch (e) { console.error("No se pudo inicializar Storage:", e); }
   } catch (e) {
     console.error("No se pudo inicializar Firebase:", e);
   }
+}
+const cloudStorageEnabled = !!firebaseStorage;
+
+/* ============================================================
+   SUBIDA DE IMÁGENES (comprobantes de pago, QR, íconos de
+   categoría, fotos de producto, etc.)
+   ------------------------------------------------------------
+   Si Firebase Storage está configurado, sube el archivo ahí y
+   devuelve una URL pública corta (ideal: se puede pegar en el
+   mensaje de WhatsApp). Si no está configurado, cae de vuelta a
+   convertir la imagen en un data URL (Base64) comprimido, tal
+   como ya hacía la tienda con las fotos de producto — así nada
+   se rompe si aún no activaste Storage.
+   ============================================================ */
+function uploadImageSmart(file, folder = "uploads") {
+  if (cloudStorageEnabled) {
+    const path = `${folder}/${Date.now()}-${uid()}-${(file.name || "img").replace(/[^a-zA-Z0-9._-]/g, "")}`;
+    const ref = firebaseStorage.ref().child(path);
+    return ref.put(file).then((snap) => snap.ref.getDownloadURL());
+  }
+  return compressImageToDataURL(file);
+}
+
+/* Firestore rechaza cualquier campo con valor "undefined" (lanza
+   FirebaseError: "Unsupported field value: undefined"). JSON.stringify
+   (usado para localStorage) en cambio los borra sin quejarse, así que
+   sin esto un dato guardado bien en local podía tronar al sincronizar
+   con la nube. Esta función reemplaza recursivamente undefined -> null
+   antes de cualquier escritura a Firestore. */
+function sanitizeForFirestore(value) {
+  if (value === undefined) return null;
+  if (Array.isArray(value)) return value.map(sanitizeForFirestore);
+  if (value && typeof value === "object" && !(value instanceof Date)) {
+    const out = {};
+    Object.keys(value).forEach((k) => { out[k] = sanitizeForFirestore(value[k]); });
+    return out;
+  }
+  return value;
 }
 
 function getCloudDocRef() {
@@ -208,7 +306,7 @@ function subscribeToCloud(onData) {
         // Primera vez: no existe el documento en la nube todavía,
         // así que lo creamos con lo que haya local (o el seed).
         const initial = migrateDB(loadLocalOnly());
-        getCloudDocRef().set(initial).catch((e) => console.error("Error creando doc inicial:", e));
+        getCloudDocRef().set(sanitizeForFirestore(initial)).catch((e) => console.error("Error creando doc inicial:", e));
       }
     },
     (err) => console.error("Error escuchando Firestore:", err)
@@ -226,6 +324,9 @@ function loadLocalOnly() {
     orders: [],
     settings: DEFAULT_SETTINGS,
     adminPassword: DEFAULT_ADMIN_PASSWORD,
+    coupons: [],
+    reviews: [],
+    faqs: SEED_FAQS,
   };
 }
 
@@ -238,9 +339,26 @@ function migrateProduct(p) {
   return { ...rest, plans: [plan(duration_label || "1 mes", price || 0)] };
 }
 
+/* Rellena con valores por defecto cualquier campo/colección nueva que no
+   exista todavía en una base de datos guardada con una versión anterior de
+   la tienda, para que nunca se rompa al cargar datos "viejos". */
 function migrateDB(db) {
-  if (!db || !Array.isArray(db.products)) return db;
-  return { ...db, products: db.products.map(migrateProduct) };
+  if (!db) return db;
+  const productsArr = Array.isArray(db.products) ? db.products : [];
+  return {
+    ...db,
+    products: productsArr.map(migrateProduct).map((p) => ({ license_keys: [], ...p })),
+    categories: (db.categories || []).map((c) => ({ icon: "", ...c })),
+    orders: db.orders || [],
+    coupons: db.coupons || [],
+    reviews: db.reviews || [],
+    faqs: db.faqs || [],
+    settings: {
+      ...DEFAULT_SETTINGS,
+      ...db.settings,
+      announcement: { ...DEFAULT_SETTINGS.announcement, ...(db.settings && db.settings.announcement) },
+    },
+  };
 }
 
 function loadDB() {
@@ -252,8 +370,282 @@ function loadDB() {
 function saveDB(db) {
   localStorage.setItem(DB_KEY, JSON.stringify(db));
   if (cloudSyncEnabled && firestoreDB) {
-    getCloudDocRef().set(db).catch((e) => console.error("Error guardando en la nube:", e));
+    getCloudDocRef().set(sanitizeForFirestore(db)).catch((e) => console.error("Error guardando en la nube:", e));
   }
+}
+
+/* ============================================================
+   SINCRONIZACIÓN CON GOOGLE SHEETS
+   ------------------------------------------------------------
+   Tres flujos independientes, cada uno opcional (mientras la URL
+   correspondiente esté vacía en Configuración, ese flujo simplemente
+   no hace nada y la tienda sigue funcionando normal):
+
+   A) CATÁLOGO: Sheets → Web (lectura)
+      Publicas una hoja de cálculo de Google como CSV y la tienda la
+      lee para crear/actualizar productos y categorías automáticamente.
+
+      Cómo obtener la URL:
+      1. En tu Google Sheet, crea una pestaña llamada por ejemplo
+         "Productos" con estas columnas en la primera fila:
+           title | category | description | image_url | stock | active
+           | features | plan1_label | plan1_price | plan2_label | plan2_price
+         (features: varias características separadas por " | ";
+          "active": SI/NO — vacío se toma como activo)
+      2. Archivo → Compartir → Publicar en la Web.
+      3. Elige la pestaña "Productos" y el formato "Valores separados
+         por comas (.csv)", luego "Publicar".
+      4. Copia el enlace que te da Google y pégalo en el Admin →
+         Configuración → "URL del CSV del catálogo (Google Sheets)".
+
+   B) CUPONES: Sheets → Web (lectura) — mismo mecanismo que el catálogo,
+      pero publicando la pestaña "Cupones" en vez de "Productos".
+      Columnas: code | type | value | active
+      (type: "percent" o "fixed"; puedes escribir también "porcentaje"/
+      "fijo"). Pega la URL publicada en Admin → Configuración → "URL
+      del CSV de cupones (Google Sheets)".
+
+   C) PEDIDOS Y RESEÑAS: Web → Sheets (escritura)
+      Cada vez que un cliente confirma un pedido, o deja una reseña,
+      además de guardarse en Firestore como siempre, se envía una copia
+      a tu Sheet (pestañas "Pedidos" y "Reseñas"), usando un pequeño
+      script de Google Apps Script como "puente" (una página estática
+      no puede escribir directo en Sheets sin esto).
+
+      Cómo configurarlo:
+      1. En tu Google Sheet: Extensiones → Apps Script.
+      2. Borra el contenido y pega esto:
+
+         function doPost(e) {
+           const ss = SpreadsheetApp.getActiveSpreadsheet();
+           const data = JSON.parse(e.postData.contents);
+
+           if (data.type === "review") {
+             let sheet = ss.getSheetByName("Reseñas");
+             if (!sheet) sheet = ss.insertSheet("Reseñas");
+             if (sheet.getLastRow() === 0) {
+               sheet.appendRow(["Fecha","Producto","Cliente","Calificación","Comentario"]);
+             }
+             sheet.appendRow([
+               data.created_at || "", data.product_title || "", data.name || "",
+               data.rating || "", data.comment || "",
+             ]);
+           } else {
+             let sheet = ss.getSheetByName("Pedidos");
+             if (!sheet) sheet = ss.insertSheet("Pedidos");
+             if (sheet.getLastRow() === 0) {
+               sheet.appendRow(["Fecha","Producto","Plan","Cantidad","Precio","Cupón","Descuento",
+                 "Cód. operación","Cliente","WhatsApp","Método de pago","Comprobante"]);
+             }
+             sheet.appendRow([
+               data.created_at || "", data.product_title || "", data.plan_duration_label || "",
+               data.qty || "", data.price_at_order || "", data.coupon_code || "", data.discount_amount || "",
+               data.operation_code || "", data.customer_name || "", data.customer_phone || "",
+               data.payment_method || "", data.payment_proof_url || "",
+             ]);
+           }
+           return ContentService.createTextOutput("OK");
+         }
+
+      3. Guarda, luego Implementar → Nueva implementación → tipo
+         "Aplicación web". En "Quién tiene acceso" elige "Cualquier
+         usuario". Implementar.
+      4. Copia la URL que te da ("...script.google.com/macros/.../exec")
+         y pégala en Admin → Configuración → "URL de webhook de pedidos
+         (Google Apps Script)" (esta misma URL sirve para pedidos Y
+         reseñas, el script las separa solo).
+   ============================================================ */
+
+/* Parser CSV simple (soporta campos con comas y saltos de línea entre
+   comillas), sin depender de ninguna librería externa. */
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], next = text[i + 1];
+    if (inQuotes) {
+      if (c === '"' && next === '"') { field += '"'; i++; }
+      else if (c === '"') { inQuotes = false; }
+      else field += c;
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ',') { row.push(field); field = ""; }
+      else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ""; }
+      else if (c === '\r') { /* ignorar */ }
+      else field += c;
+    }
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.some((v) => (v || "").trim() !== ""));
+}
+
+function slugify(s) {
+  return String(s || "").toLowerCase().trim()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, "-").replace(/(^-+|-+$)/g, "");
+}
+
+function csvBool(v, def = true) {
+  const s = String(v || "").trim().toLowerCase();
+  if (!s) return def;
+  return !["no", "false", "0", "inactivo", "inactive"].includes(s);
+}
+
+/* Convierte las filas del CSV (con encabezados) en productos + categorías,
+   creando automáticamente las categorías nuevas que aparezcan en la hoja. */
+function rowsToProducts(rows, existingCategories) {
+  if (rows.length < 2) return { products: [], categories: existingCategories };
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  const idx = {};
+  header.forEach((h, i) => { if (idx[h] === undefined) idx[h] = i; });
+  const get = (r, ...keys) => {
+    for (const k of keys) { if (idx[k] !== undefined && r[idx[k]] != null) return String(r[idx[k]]).trim(); }
+    return "";
+  };
+  const categories = existingCategories.map((c) => ({ ...c }));
+  const products = rows.slice(1).map((r) => {
+    const title = get(r, "title", "titulo", "título", "nombre");
+    if (!title) return null;
+
+    const categoryName = get(r, "category", "categoria", "categoría");
+    let category_id = null;
+    if (categoryName) {
+      const slug = slugify(categoryName);
+      let cat = categories.find((c) => c.slug === slug);
+      if (!cat) { cat = { id: uid(), name: categoryName, slug, icon: "" }; categories.push(cat); }
+      category_id = cat.id;
+    }
+
+    const plans = [];
+    for (let n = 1; n <= 4; n++) {
+      const label = get(r, `plan${n}_label`, `plan${n} label`);
+      const priceRaw = get(r, `plan${n}_price`, `plan${n} price`);
+      if (label && priceRaw) plans.push(plan(label, parseFloat(priceRaw.replace(",", ".")) || 0));
+    }
+    if (plans.length === 0) {
+      const priceRaw = get(r, "price", "precio");
+      plans.push(plan(get(r, "duration", "duracion", "duración") || "1 mes", parseFloat((priceRaw || "0").replace(",", ".")) || 0));
+    }
+
+    const featuresRaw = get(r, "features", "caracteristicas", "características");
+
+    return {
+      id: get(r, "id") || `sheet-${slugify(title)}`,
+      title,
+      slug: slugify(title),
+      category_id,
+      description: get(r, "description", "descripcion", "descripción"),
+      image_url: get(r, "image_url", "imagen", "image"),
+      stock: parseInt(get(r, "stock") || "0", 10) || 0,
+      is_active: csvBool(get(r, "active", "activo")),
+      features: featuresRaw ? featuresRaw.split("|").map((s) => s.trim()).filter(Boolean) : [],
+      plans,
+      license_keys: [],
+    };
+  }).filter(Boolean);
+
+  return { products, categories };
+}
+
+/* Descarga el CSV publicado y reemplaza el catálogo (productos +
+   categorías) en la base de datos, conservando las claves/licencias que
+   ya tuviera cargadas cada producto (para no perder inventario). */
+async function syncCatalogFromSheet(csvUrl, setDb) {
+  if (!csvUrl || !csvUrl.trim()) return { ok: false, message: "No configuraste la URL del CSV del catálogo." };
+  let text;
+  try {
+    const res = await fetch(csvUrl, { cache: "no-store" });
+    if (!res.ok) throw new Error("No se pudo leer el Google Sheet. Revisa que esté publicado a la web como CSV.");
+    text = await res.text();
+  } catch (e) {
+    return { ok: false, message: e.message || "Error de red al leer el Google Sheet." };
+  }
+
+  return new Promise((resolve) => {
+    setDb((prev) => {
+      let result;
+      try {
+        const rows = parseCSV(text);
+        const { products, categories } = rowsToProducts(rows, prev.categories);
+        const merged = products.map((p) => {
+          const old = prev.products.find((op) => op.id === p.id);
+          return old ? { ...p, license_keys: old.license_keys || [] } : p;
+        });
+        const next = { ...prev, products: merged, categories };
+        saveDB(next);
+        result = { ok: true, count: merged.length };
+        resolve(result);
+        return next;
+      } catch (e) {
+        resolve({ ok: false, message: "El CSV no tiene el formato esperado." });
+        return prev;
+      }
+    });
+  });
+}
+
+/* Envía datos (pedidos o reseñas) al webhook de Apps Script, que los
+   reparte en la pestaña correspondiente de tu Sheet según "type".
+   Es "fire and forget": si falla (o no está configurado), no interrumpe
+   nada en la tienda — todo sigue guardándose en Firestore igual. */
+function sendToSheet(webhookUrl, type, items) {
+  if (!webhookUrl || !webhookUrl.trim()) return;
+  items.forEach((item) => {
+    fetch(webhookUrl, {
+      method: "POST",
+      mode: "no-cors",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ type, ...item }),
+    }).catch((e) => console.warn("No se pudo enviar a Google Sheets:", e));
+  });
+}
+
+/* Descarga el CSV de cupones publicado y reemplaza SOLO los cupones que
+   vinieron del Sheet (id "sheet-<código>"), sin tocar los que hayas
+   creado a mano desde el Admin. Columnas esperadas: code | type | value
+   | active  (type: "percent"/"porcentaje" o "fixed"/"fijo"). */
+async function syncCouponsFromSheet(csvUrl, setDb) {
+  if (!csvUrl || !csvUrl.trim()) return { ok: false, message: "No configuraste la URL del CSV de cupones." };
+  let text;
+  try {
+    const res = await fetch(csvUrl, { cache: "no-store" });
+    if (!res.ok) throw new Error("No se pudo leer el Google Sheet de cupones. Revisa que esté publicado a la web como CSV.");
+    text = await res.text();
+  } catch (e) {
+    return { ok: false, message: e.message || "Error de red al leer el Google Sheet de cupones." };
+  }
+
+  return new Promise((resolve) => {
+    setDb((prev) => {
+      try {
+        const rows = parseCSV(text);
+        if (rows.length < 2) { resolve({ ok: true, count: 0 }); return prev; }
+        const header = rows[0].map((h) => h.trim().toLowerCase());
+        const idx = {};
+        header.forEach((h, i) => { if (idx[h] === undefined) idx[h] = i; });
+        const get = (r, ...keys) => {
+          for (const k of keys) { if (idx[k] !== undefined && r[idx[k]] != null) return String(r[idx[k]]).trim(); }
+          return "";
+        };
+        const sheetCoupons = rows.slice(1).map((r) => {
+          const code = get(r, "code", "codigo", "código").toUpperCase();
+          if (!code) return null;
+          const typeRaw = get(r, "type", "tipo").toLowerCase();
+          const type = ["fixed", "fijo", "monto"].includes(typeRaw) ? "fixed" : "percent";
+          const value = parseFloat((get(r, "value", "valor") || "0").replace(",", ".")) || 0;
+          return { id: `sheet-${code}`, code, type, value, active: csvBool(get(r, "active", "activo")) };
+        }).filter(Boolean);
+
+        const next = { ...prev, coupons: [...(prev.coupons || []).filter((c) => !String(c.id).startsWith("sheet-")), ...sheetCoupons] };
+        saveDB(next);
+        resolve({ ok: true, count: sheetCoupons.length });
+        return next;
+      } catch (e) {
+        resolve({ ok: false, message: "El CSV de cupones no tiene el formato esperado." });
+        return prev;
+      }
+    });
+  });
 }
 
 /* ============================================================
@@ -279,12 +671,119 @@ const Icon = {
   Trash: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>,
   Edit: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
   Plus: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+  Minus: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+  Cart: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>,
+  ChevronRight: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"/></svg>,
+  ChevronDown: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>,
+  Star: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
+  StarFilled: (p) => <svg {...p} viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>,
+  Copy: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>,
+  Tag: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.59 13.41L13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>,
+  Key: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>,
+  QrCode: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><line x1="14" y1="14" x2="14" y2="21"/><line x1="21" y1="14" x2="21" y2="21"/><line x1="17.5" y1="14" x2="17.5" y2="17.5"/><line x1="14" y1="17.5" x2="21" y2="17.5"/></svg>,
+  Megaphone: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 11l18-5v12L3 13v-2z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg>,
+  HelpCircle: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>,
+  Paperclip: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>,
+  Sheet: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>,
 };
+
+/* ============================================================
+   DROPDOWN PROPIO (reemplaza al <select> nativo)
+   ------------------------------------------------------------
+   En Windows, Chrome a veces renderiza el popup de un <select>
+   con el tema del sistema operativo e ignora por completo el CSS
+   de la página (aunque tenga color-scheme:dark y estilos en las
+   <option>) — el menú sale negro sobre negro, ilegible. Este
+   componente dibuja el menú nosotros mismos con divs normales,
+   así siempre se ve igual sin importar el navegador/SO.
+   ============================================================ */
+function Dropdown({ value, onChange, options, buttonStyle }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function onDocClick(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
+  const current = options.find((o) => o.value === value);
+
+  return (
+    <div ref={ref} style={{ position: "relative", display: "inline-block", width: buttonStyle && buttonStyle.width ? buttonStyle.width : "auto" }}>
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8,
+          width: "100%", borderRadius: 8, border: "1px solid var(--base-700)",
+          background: "var(--base-800)", color: "#fff", padding: "8px 12px", fontSize: 13,
+          fontFamily: "inherit", cursor: "pointer", textAlign: "left",
+          ...buttonStyle,
+        }}>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{current ? current.label : ""}</span>
+        <Icon.ChevronDown style={{ width: 13, height: 13, flexShrink: 0, color: "#9ca3af", transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", left: 0, minWidth: "100%", zIndex: 60,
+          borderRadius: 10, border: "1px solid var(--base-700)", background: "#161b29",
+          boxShadow: "0 12px 28px rgba(0,0,0,.55)", overflow: "hidden", maxHeight: 260, overflowY: "auto",
+        }}>
+          {options.map((o) => (
+            <div key={o.value}
+              onClick={() => { onChange(o.value); setOpen(false); }}
+              style={{
+                padding: "8px 12px", fontSize: 13, color: "#fff", cursor: "pointer", whiteSpace: "nowrap",
+                background: o.value === value ? "var(--base-700)" : "transparent",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--base-700)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = o.value === value ? "var(--base-700)" : "transparent"; }}>
+              {o.label}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Estrellas de calificación (solo lectura o interactivas). */
+function StarRating({ value, onChange, size = 16 }) {
+  const stars = [1, 2, 3, 4, 5];
+  return (
+    <div style={{ display: "flex", gap: 2 }}>
+      {stars.map((n) => {
+        const filled = n <= Math.round(value);
+        const StarIcon = filled ? Icon.StarFilled : Icon.Star;
+        return (
+          <span key={n} onClick={onChange ? () => onChange(n) : undefined}
+            style={{ color: filled ? "#fbbf24" : "#4b5563", cursor: onChange ? "pointer" : "default", display: "flex" }}>
+            <StarIcon style={{ width: size, height: size }} />
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
 /* ============================================================
    HEADER
    ============================================================ */
-function Header({ categories, search, onSearchChange, activeCategory, onCategoryChange, whatsappNumber }) {
+function AnnouncementBanner({ announcement }) {
+  if (!announcement || !announcement.active || !announcement.text) return null;
+  const content = (
+    <span style={{ display: "block", width: "100%", textAlign: "center", padding: "8px 16px", fontSize: 13, fontWeight: 600, color: "#fff", background: announcement.bg_color || "var(--accent-600)" }}>
+      {announcement.text}
+    </span>
+  );
+  if (announcement.link) {
+    return <a href={announcement.link} target="_blank" rel="noopener noreferrer">{content}</a>;
+  }
+  return content;
+}
+
+function Header({ categories, search, onSearchChange, activeCategory, onCategoryChange, whatsappNumber, cartCount, onOpenCart, announcement }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const waLink = `https://wa.me/${whatsappNumber}?text=${encodeURIComponent("Hola, quisiera más información sobre sus productos digitales.")}`;
 
@@ -295,8 +794,20 @@ function Header({ categories, search, onSearchChange, activeCategory, onCategory
     border: "none",
   });
 
+  const cartButton = (
+    <button onClick={onOpenCart} style={{ position: "relative", background: "none", border: "none", color: "#fff", padding: 8, borderRadius: 8, cursor: "pointer" }}>
+      <Icon.Cart style={{ width: 20, height: 20 }} />
+      {cartCount > 0 && (
+        <span style={{ position: "absolute", top: 0, right: 0, minWidth: 16, height: 16, borderRadius: 999, background: "var(--signal-500)", color: "#fff", fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px" }}>
+          {cartCount}
+        </span>
+      )}
+    </button>
+  );
+
   return (
     <header style={{ position: "sticky", top: 0, zIndex: 40, borderBottom: "1px solid rgba(26,31,46,.6)", background: "rgba(5,6,10,.9)", backdropFilter: "blur(8px)" }}>
+      <AnnouncementBanner announcement={announcement} />
       <div style={{ maxWidth: 1280, margin: "0 auto", display: "flex", alignItems: "center", gap: 16, padding: "12px 16px" }}>
         <a href="#/" style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
           <div style={{ width: 36, height: 36, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, background: "linear-gradient(135deg, var(--accent-500), var(--signal-500))" }}>D</div>
@@ -312,18 +823,26 @@ function Header({ categories, search, onSearchChange, activeCategory, onCategory
         <nav className="desktop-nav" style={{ display: "none", alignItems: "center", gap: 4 }}>
           <button onClick={() => onCategoryChange(null)} style={catBtnStyle(activeCategory === null)}>Todos</button>
           {categories.map((c) => (
-            <button key={c.id} onClick={() => onCategoryChange(c.slug)} style={catBtnStyle(activeCategory === c.slug)}>{c.name}</button>
+            <button key={c.id} onClick={() => onCategoryChange(c.slug)} style={catBtnStyle(activeCategory === c.slug)}>
+              {c.icon && !c.icon.startsWith("http") ? `${c.icon} ` : ""}{c.name}
+            </button>
           ))}
         </nav>
 
-        <a href={waLink} target="_blank" rel="noopener noreferrer" className="desktop-wa"
-          style={{ display: "none", alignItems: "center", gap: 8, borderRadius: 999, background: "var(--success-500)", padding: "8px 16px", fontSize: 14, fontWeight: 500, color: "#fff", boxShadow: "0 4px 10px rgba(0,0,0,.3)" }}>
-          <Icon.WhatsApp style={{ width: 16, height: 16 }} /> WhatsApp
-        </a>
+        <div className="desktop-wa-wrap" style={{ display: "none", alignItems: "center", gap: 12 }}>
+          <a href={waLink} target="_blank" rel="noopener noreferrer"
+            style={{ display: "flex", alignItems: "center", gap: 8, borderRadius: 999, background: "var(--success-500)", padding: "8px 16px", fontSize: 14, fontWeight: 500, color: "#fff", boxShadow: "0 4px 10px rgba(0,0,0,.3)" }}>
+            <Icon.WhatsApp style={{ width: 16, height: 16 }} /> WhatsApp
+          </a>
+          {cartButton}
+        </div>
 
-        <button onClick={() => setMobileOpen((v) => !v)} className="mobile-toggle" style={{ marginLeft: "auto", background: "none", border: "none", color: "#fff", padding: 8, borderRadius: 8 }}>
-          {mobileOpen ? <Icon.X style={{ width: 20, height: 20 }} /> : <Icon.Menu style={{ width: 20, height: 20 }} />}
-        </button>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }} className="mobile-header-actions">
+          <span className="mobile-only-cart">{cartButton}</span>
+          <button onClick={() => setMobileOpen((v) => !v)} className="mobile-toggle" style={{ background: "none", border: "none", color: "#fff", padding: 8, borderRadius: 8 }}>
+            {mobileOpen ? <Icon.X style={{ width: 20, height: 20 }} /> : <Icon.Menu style={{ width: 20, height: 20 }} />}
+          </button>
+        </div>
       </div>
 
       {mobileOpen && (
@@ -336,7 +855,9 @@ function Header({ categories, search, onSearchChange, activeCategory, onCategory
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
             <button onClick={() => onCategoryChange(null)} style={{ ...catBtnStyle(activeCategory === null), fontSize: 12, background: activeCategory === null ? "rgba(34,184,255,.2)" : "var(--base-800)" }}>Todos</button>
             {categories.map((c) => (
-              <button key={c.id} onClick={() => onCategoryChange(c.slug)} style={{ ...catBtnStyle(activeCategory === c.slug), fontSize: 12, background: activeCategory === c.slug ? "rgba(34,184,255,.2)" : "var(--base-800)" }}>{c.name}</button>
+              <button key={c.id} onClick={() => onCategoryChange(c.slug)} style={{ ...catBtnStyle(activeCategory === c.slug), fontSize: 12, background: activeCategory === c.slug ? "rgba(34,184,255,.2)" : "var(--base-800)" }}>
+                {c.icon && !c.icon.startsWith("http") ? `${c.icon} ` : ""}{c.name}
+              </button>
             ))}
           </div>
           <a href={waLink} target="_blank" rel="noopener noreferrer" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 999, background: "var(--success-500)", padding: "10px 16px", fontSize: 14, fontWeight: 500, color: "#fff" }}>
@@ -351,14 +872,23 @@ function Header({ categories, search, onSearchChange, activeCategory, onCategory
 /* ============================================================
    PRODUCT CARD
    ============================================================ */
-function ProductCard({ product, onSelect }) {
+function ProductCard({ product, onSelect, onQuickAdd }) {
   const inStock = product.stock > 0;
   const plans = product.plans || [];
   const minPlan = plans.reduce((min, pl) => (!min || pl.price < min.price ? pl : min), null);
   const singlePlan = plans.length === 1 ? plans[0] : null;
+
+  function handleButtonClick() {
+    if (singlePlan) {
+      onQuickAdd(product, singlePlan.id, 1);
+    } else {
+      onSelect(product);
+    }
+  }
+
   return (
     <div className="card-hover" style={{ position: "relative", overflow: "hidden", borderRadius: 20, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", boxShadow: "0 10px 25px rgba(0,0,0,.3)" }}>
-      <div style={{ position: "relative", height: 160, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", background: "var(--base-700)" }}>
+      <div onClick={() => onSelect(product)} style={{ position: "relative", height: 160, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", background: "var(--base-700)", cursor: "pointer" }}>
         {product.image_url ? (
           <img src={product.image_url} alt={product.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={(e) => { e.target.style.display = "none"; }} />
         ) : (
@@ -369,7 +899,7 @@ function ProductCard({ product, onSelect }) {
         </span>
       </div>
       <div style={{ padding: 16 }}>
-        <h3 className="line-clamp-1" style={{ margin: "0 0 4px", fontSize: 16, fontWeight: 600 }}>{product.title}</h3>
+        <h3 onClick={() => onSelect(product)} className="line-clamp-1" style={{ margin: "0 0 4px", fontSize: 16, fontWeight: 600, cursor: "pointer" }}>{product.title}</h3>
         {singlePlan ? (
           <p style={{ margin: "0 0 12px", fontSize: 12, color: "#9ca3af" }}>{singlePlan.duration_label}</p>
         ) : (
@@ -391,10 +921,10 @@ function ProductCard({ product, onSelect }) {
           <span style={{ fontSize: 18, fontWeight: 700 }}>
             {singlePlan ? `S/ ${singlePlan.price.toFixed(2)}` : `Desde S/ ${(minPlan?.price ?? 0).toFixed(2)}`}
           </span>
-          <button disabled={!inStock} onClick={() => onSelect(product)} className={inStock ? "neon-red-hover" : ""}
+          <button disabled={!inStock} onClick={handleButtonClick} className={inStock ? "neon-red-hover" : ""}
             style={{ borderRadius: 999, padding: "8px 16px", fontSize: 14, fontWeight: 500, border: "none", transition: "all .15s",
               background: inStock ? "var(--signal-500)" : "var(--base-700)", color: inStock ? "#fff" : "#6b7280", cursor: inStock ? "pointer" : "not-allowed" }}>
-            {inStock ? "Comprar" : "Agotado"}
+            {inStock ? (singlePlan ? "Agregar" : "Ver opciones") : "Agotado"}
           </button>
         </div>
       </div>
@@ -405,7 +935,7 @@ function ProductCard({ product, onSelect }) {
 /* ============================================================
    CATALOG GRID
    ============================================================ */
-function CatalogGrid({ products, onSelect }) {
+function CatalogGrid({ products, onSelect, onQuickAdd }) {
   const [duration, setDuration] = useState("Todos");
   const [maxPrice, setMaxPrice] = useState(200);
   const [showFilters, setShowFilters] = useState(false);
@@ -456,7 +986,7 @@ function CatalogGrid({ products, onSelect }) {
       )}
 
       <div className="products-grid" style={{ display: "grid", gridTemplateColumns: "repeat(1,1fr)", gap: 20 }}>
-        {filtered.map((p) => <ProductCard key={p.id} product={p} onSelect={onSelect} />)}
+        {filtered.map((p) => <ProductCard key={p.id} product={p} onSelect={onSelect} onQuickAdd={onQuickAdd} />)}
       </div>
 
       {filtered.length === 0 && <div style={{ padding: "64px 0", textAlign: "center", color: "#6b7280" }}>No se encontraron productos con estos filtros.</div>}
@@ -465,189 +995,634 @@ function CatalogGrid({ products, onSelect }) {
 }
 
 /* ============================================================
-   CHECKOUT MODAL
+   MODAL DE DETALLE DE PRODUCTO (+ productos similares)
    ============================================================ */
-const PAYMENT_OPTIONS = [
-  { value: "yape", label: "Yape", icon: Icon.Smartphone },
-  { value: "plin", label: "Plin", icon: Icon.Smartphone },
-  { value: "transferencia", label: "Transferencia bancaria", icon: Icon.Bank },
-];
-
-function CheckoutModal({ product, settings, onClose, onCreateOrder }) {
+function ReviewsSection({ product, reviews, onAddReview }) {
   const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [payment, setPayment] = useState("yape");
-  const [selectedPlanId, setSelectedPlanId] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const [rating, setRating] = useState(5);
+  const [comment, setComment] = useState("");
+  const [sent, setSent] = useState(false);
+  const [showForm, setShowForm] = useState(false);
 
-  // Cuando se abre el modal con un producto nuevo, preselecciona su primer plan.
+  const approved = reviews.filter((r) => r.product_id === product.id && r.approved);
+  const avg = approved.length ? approved.reduce((s, r) => s + r.rating, 0) / approved.length : 0;
+
+  function submit() {
+    if (!name.trim() || !comment.trim()) return;
+    onAddReview({ id: uid(), product_id: product.id, name: name.trim(), rating, comment: comment.trim(), approved: false, created_at: new Date().toISOString() });
+    setName(""); setComment(""); setRating(5); setShowForm(false); setSent(true);
+    setTimeout(() => setSent(false), 3000);
+  }
+
+  const inputStyle = { width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 13, color: "#fff", colorScheme: "dark" };
+
+  return (
+    <div style={{ marginTop: 28, borderTop: "1px solid var(--base-700)", paddingTop: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: "#d1d5db" }}>Reseñas</h3>
+          {approved.length > 0 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <StarRating value={avg} size={14} />
+              <span style={{ fontSize: 12, color: "#9ca3af" }}>{avg.toFixed(1)} ({approved.length})</span>
+            </div>
+          )}
+        </div>
+        {!showForm && <button onClick={() => setShowForm(true)} style={{ background: "none", border: "1px solid var(--base-700)", color: "var(--accent-400)", borderRadius: 999, padding: "4px 12px", fontSize: 12 }}>Escribir reseña</button>}
+      </div>
+
+      {showForm && (
+        <div className="fade-in" style={{ marginBottom: 16, borderRadius: 12, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+          <StarRating value={rating} onChange={setRating} size={20} />
+          <input style={inputStyle} placeholder="Tu nombre" value={name} onChange={(e) => setName(e.target.value)} />
+          <textarea rows={2} style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} placeholder="Cuéntanos tu experiencia..." value={comment} onChange={(e) => setComment(e.target.value)} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={submit} disabled={!name.trim() || !comment.trim()} style={{ borderRadius: 999, border: "none", background: "var(--success-500)", color: "#fff", padding: "6px 14px", fontSize: 12, fontWeight: 600, opacity: (!name.trim() || !comment.trim()) ? 0.5 : 1 }}>Enviar</button>
+            <button onClick={() => setShowForm(false)} style={{ borderRadius: 999, border: "1px solid var(--base-700)", background: "transparent", color: "#9ca3af", padding: "6px 14px", fontSize: 12 }}>Cancelar</button>
+          </div>
+        </div>
+      )}
+      {sent && <p style={{ fontSize: 12, color: "var(--success-500)", marginBottom: 12 }}>✓ ¡Gracias! Tu reseña se publicará luego de ser revisada.</p>}
+
+      {approved.length === 0 ? (
+        <p style={{ fontSize: 13, color: "#6b7280" }}>Aún no hay reseñas para este producto. ¡Sé el primero en opinar!</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {approved.map((r) => (
+            <div key={r.id} style={{ borderRadius: 10, border: "1px solid var(--base-700)", padding: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>{r.name}</span>
+                <StarRating value={r.rating} size={12} />
+              </div>
+              <p style={{ margin: 0, fontSize: 12, color: "#d1d5db" }}>{r.comment}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProductDetailModal({ product, allProducts, reviews, onAddReview, onClose, onAddToCart, onSelectProduct }) {
+  const [selectedPlanId, setSelectedPlanId] = useState(null);
+  const [qty, setQty] = useState(1);
+  const [justAdded, setJustAdded] = useState(false);
+
   useEffect(() => {
     if (product && product.plans && product.plans.length > 0) {
       setSelectedPlanId(product.plans[0].id);
     } else {
       setSelectedPlanId(null);
     }
+    setQty(1);
+    setJustAdded(false);
   }, [product]);
 
   if (!product) return null;
 
   const plans = product.plans || [];
   const selectedPlan = plans.find((pl) => pl.id === selectedPlanId) || plans[0];
-  const paymentLabel = PAYMENT_OPTIONS.find((p) => p.value === payment)?.label ?? payment;
+  const inStock = product.stock > 0;
 
-  function handleConfirm() {
-    if (!name.trim() || !phone.trim()) {
-      setError("Por favor completa tu nombre y número de WhatsApp.");
-      return;
-    }
-    if (!selectedPlan) {
-      setError("Este producto no tiene planes disponibles todavía.");
-      return;
-    }
-    setError(null);
-    setLoading(true);
+  const similar = allProducts.filter((p) => p.id !== product.id && p.is_active && p.category_id === product.category_id).slice(0, 4);
 
-    setTimeout(() => {
-      onCreateOrder({
-        id: uid(), product_id: product.id, customer_name: name.trim(), customer_phone: phone.trim(),
-        payment_method: payment, plan_duration_label: selectedPlan.duration_label, price_at_order: selectedPlan.price, status: "pendiente",
-        notes: null, created_at: new Date().toISOString(),
-      });
-      setLoading(false);
-
-      const message = [
-        `Hola, deseo adquirir *${product.title}* (${selectedPlan.duration_label}) por S/ ${selectedPlan.price.toFixed(2)}.`,
-        `Método de pago: ${paymentLabel}.`,
-        `Mi nombre es ${name.trim()} y mi número es ${phone.trim()}.`,
-      ].join(" ");
-      const waUrl = `https://wa.me/${settings.whatsapp_number}?text=${encodeURIComponent(message)}`;
-      window.open(waUrl, "_blank");
-      onClose();
-    }, 400);
+  function handleAdd() {
+    if (!selectedPlan) return;
+    onAddToCart(product, selectedPlan.id, qty);
+    setJustAdded(true);
+    setTimeout(() => setJustAdded(false), 1600);
   }
 
   return (
     <div className="fade-in" onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.7)", backdropFilter: "blur(4px)", padding: 16 }}>
-      <div className="slide-up" onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 420, borderRadius: 20, border: "1px solid var(--base-700)", background: "var(--base-900)", padding: 24, maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 16 }}>
-          <div>
-            <h2 style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 600 }}>{product.title}</h2>
-            {selectedPlan && <p style={{ margin: 0, fontSize: 14, color: "#9ca3af" }}>{selectedPlan.duration_label} · S/ {selectedPlan.price.toFixed(2)}</p>}
-          </div>
-          <button onClick={onClose} style={{ background: "none", border: "none", color: "#9ca3af", padding: 4, borderRadius: 999 }}><Icon.X style={{ width: 20, height: 20 }} /></button>
+      <div className="slide-up" onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 640, borderRadius: 20, border: "1px solid var(--base-700)", background: "var(--base-900)", maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ position: "relative", height: 260, background: "var(--base-700)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", borderRadius: "20px 20px 0 0" }}>
+          {product.image_url ? (
+            <img src={product.image_url} alt={product.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={(e) => { e.target.style.display = "none"; }} />
+          ) : (
+            <Icon.ImageOff style={{ width: 40, height: 40, color: "var(--base-600)" }} />
+          )}
+          <button onClick={onClose} style={{ position: "absolute", top: 12, right: 12, background: "rgba(0,0,0,.5)", border: "none", color: "#fff", padding: 6, borderRadius: 999 }}><Icon.X style={{ width: 18, height: 18 }} /></button>
+          <span style={{ position: "absolute", left: 12, top: 12, borderRadius: 999, padding: "4px 10px", fontSize: 12, fontWeight: 500, background: inStock ? "rgba(34,197,94,.2)" : "rgba(255,45,77,.2)", color: inStock ? "var(--success-500)" : "var(--signal-400)" }}>
+            {inStock ? "Disponible" : "Agotado"}
+          </span>
         </div>
 
-        {plans.length > 1 && (
-          <div style={{ marginBottom: 16 }}>
-            <label style={{ display: "block", marginBottom: 8, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Elige la duración</label>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {plans.map((pl) => {
-                const active = pl.id === selectedPlanId;
-                return (
-                  <button key={pl.id} onClick={() => setSelectedPlanId(pl.id)}
-                    style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, borderRadius: 12, padding: "8px 14px", fontSize: 12,
-                      border: active ? "1px solid var(--accent-500)" : "1px solid var(--base-700)",
-                      background: active ? "rgba(34,184,255,.1)" : "transparent", color: active ? "var(--accent-400)" : "#9ca3af" }}>
-                    <span style={{ fontWeight: 600 }}>{pl.duration_label}</span>
-                    <span>S/ {pl.price.toFixed(2)}</span>
-                  </button>
-                );
-              })}
+        <div style={{ padding: 24 }}>
+          <h2 style={{ margin: "0 0 8px", fontSize: 20, fontWeight: 700 }}>{product.title}</h2>
+          {product.description && <p style={{ margin: "0 0 16px", fontSize: 14, color: "#d1d5db", lineHeight: 1.6 }}>{product.description}</p>}
+
+          {product.features && product.features.length > 0 && (
+            <ul style={{ listStyle: "none", margin: "0 0 20px", padding: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+              {product.features.map((f, i) => (
+                <li key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, color: "#d1d5db" }}>
+                  <Icon.Check style={{ width: 14, height: 14, marginTop: 2, flexShrink: 0, color: "var(--accent-400)" }} />
+                  <span>{f}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {plans.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: "block", marginBottom: 8, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Elige la duración</label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {plans.map((pl) => {
+                  const active = pl.id === selectedPlanId;
+                  return (
+                    <button key={pl.id} onClick={() => setSelectedPlanId(pl.id)}
+                      style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, borderRadius: 12, padding: "8px 14px", fontSize: 12,
+                        border: active ? "1px solid var(--accent-500)" : "1px solid var(--base-700)",
+                        background: active ? "rgba(34,184,255,.1)" : "transparent", color: active ? "var(--accent-400)" : "#9ca3af" }}>
+                      <span style={{ fontWeight: 600 }}>{pl.duration_label}</span>
+                      <span>S/ {pl.price.toFixed(2)}</span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
+          )}
+
+          <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 20 }}>
+            <div>
+              <label style={{ display: "block", marginBottom: 8, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Cantidad</label>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, border: "1px solid var(--base-700)", borderRadius: 999, padding: "4px 8px" }}>
+                <button onClick={() => setQty((q) => Math.max(1, q - 1))} style={{ background: "none", border: "none", color: "#fff", padding: 4, borderRadius: 999 }}><Icon.Minus style={{ width: 14, height: 14 }} /></button>
+                <span style={{ minWidth: 20, textAlign: "center", fontSize: 14, fontWeight: 600 }}>{qty}</span>
+                <button onClick={() => setQty((q) => q + 1)} style={{ background: "none", border: "none", color: "#fff", padding: 4, borderRadius: 999 }}><Icon.Plus style={{ width: 14, height: 14 }} /></button>
+              </div>
+            </div>
+            {selectedPlan && (
+              <div style={{ marginLeft: "auto", textAlign: "right" }}>
+                <p style={{ margin: 0, fontSize: 12, color: "#9ca3af" }}>Subtotal</p>
+                <p style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>S/ {(selectedPlan.price * qty).toFixed(2)}</p>
+              </div>
+            )}
           </div>
-        )}
 
-        <label style={{ display: "block", marginBottom: 8, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Método de pago</label>
-        <div style={{ marginBottom: 16, display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
-          {PAYMENT_OPTIONS.map((opt) => {
-            const IconC = opt.icon;
-            const active = payment === opt.value;
-            return (
-              <button key={opt.value} onClick={() => setPayment(opt.value)}
-                style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, borderRadius: 12, padding: 10, fontSize: 12,
-                  border: active ? "1px solid var(--accent-500)" : "1px solid var(--base-700)",
-                  background: active ? "rgba(34,184,255,.1)" : "transparent", color: active ? "var(--accent-400)" : "#9ca3af" }}>
-                <IconC style={{ width: 16, height: 16 }} />{opt.label}
-              </button>
-            );
-          })}
-        </div>
+          <button onClick={handleAdd} disabled={!inStock || !selectedPlan}
+            style={{ display: "flex", width: "100%", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 999,
+              background: justAdded ? "var(--success-500)" : (inStock ? "var(--signal-500)" : "var(--base-700)"), padding: "12px", fontSize: 14, fontWeight: 600, color: inStock ? "#fff" : "#6b7280",
+              border: "none", cursor: inStock ? "pointer" : "not-allowed", transition: "background .2s" }}>
+            {justAdded ? <><Icon.Check style={{ width: 16, height: 16 }} /> Añadido al carrito</> : (inStock ? <><Icon.Cart style={{ width: 16, height: 16 }} /> Agregar al carrito</> : "Agotado")}
+          </button>
 
-        <div style={{ marginBottom: 16, borderRadius: 12, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 12, fontSize: 14, color: "#d1d5db" }}>
-          {payment === "yape" && <p style={{ margin: 0 }}>Yapea a: <span style={{ fontWeight: 600, color: "#fff" }}>{settings.yape_number ?? "—"}</span></p>}
-          {payment === "plin" && <p style={{ margin: 0 }}>Plinea a: <span style={{ fontWeight: 600, color: "#fff" }}>{settings.plin_number ?? "—"}</span></p>}
-          {payment === "transferencia" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <p style={{ margin: 0 }}>BCP: <span style={{ fontWeight: 600, color: "#fff" }}>{settings.bank_bcp_account ?? "—"}</span></p>
-              <p style={{ margin: 0 }}>Interbank: <span style={{ fontWeight: 600, color: "#fff" }}>{settings.bank_interbank_account ?? "—"}</span></p>
+          <ReviewsSection product={product} reviews={reviews || []} onAddReview={onAddReview} />
+
+          {similar.length > 0 && (
+            <div style={{ marginTop: 28 }}>
+              <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: "#d1d5db" }}>Productos similares</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10 }}>
+                {similar.map((sp) => {
+                  const spPlan = (sp.plans || [])[0];
+                  return (
+                    <button key={sp.id} onClick={() => onSelectProduct(sp)} style={{ textAlign: "left", display: "flex", gap: 10, alignItems: "center", borderRadius: 12, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 8, cursor: "pointer" }}>
+                      <div style={{ width: 48, height: 48, borderRadius: 8, overflow: "hidden", flexShrink: 0, background: "var(--base-700)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        {sp.image_url ? <img src={sp.image_url} alt={sp.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Icon.ImageOff style={{ width: 16, height: 16, color: "var(--base-600)" }} />}
+                      </div>
+                      <div style={{ minWidth: 0 }}>
+                        <p className="line-clamp-1" style={{ margin: 0, fontSize: 12, fontWeight: 600 }}>{sp.title}</p>
+                        {spPlan && <p style={{ margin: 0, fontSize: 11, color: "#9ca3af" }}>S/ {spPlan.price.toFixed(2)}</p>}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>
-
-        <div style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 12 }}>
-          <div>
-            <label style={{ display: "block", marginBottom: 4, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Nombre</label>
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Tu nombre completo"
-              style={{ width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 14, color: "#fff" }} />
-          </div>
-          <div>
-            <label style={{ display: "block", marginBottom: 4, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>WhatsApp</label>
-            <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+51 9XX XXX XXX"
-              style={{ width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 14, color: "#fff" }} />
-          </div>
-        </div>
-
-        {error && <p style={{ marginBottom: 12, fontSize: 12, color: "var(--signal-400)" }}>{error}</p>}
-
-        <button onClick={handleConfirm} disabled={loading || !selectedPlan}
-          style={{ display: "flex", width: "100%", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 999, background: "var(--success-500)", padding: "12px", fontSize: 14, fontWeight: 600, color: "#fff", border: "none", opacity: loading ? 0.6 : 1 }}>
-          {loading && <Icon.Loader className="spin" style={{ width: 16, height: 16 }} />}
-          Confirmar por WhatsApp
-        </button>
       </div>
     </div>
   );
 }
 
 /* ============================================================
+   CARRITO (varios productos) + CHECKOUT
+   ============================================================ */
+const PAYMENT_OPTIONS = [
+  { value: "yape", label: "Yape", icon: Icon.Smartphone },
+  { value: "transferencia", label: "Transferencia BCP / CCI", icon: Icon.Bank },
+];
+
+function CartModal({ cart, products, settings, coupons, onClose, onUpdateQty, onRemove, onCreateOrders, onCleared }) {
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [payment, setPayment] = useState("yape");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [couponInput, setCouponInput] = useState("");
+  const [appliedCoupon, setAppliedCoupon] = useState(null);
+  const [couponMsg, setCouponMsg] = useState(null);
+  const [opCode, setOpCode] = useState("");
+  const [proofFile, setProofFile] = useState(null);
+  const [proofPreview, setProofPreview] = useState(null);
+  const [uploadingProof, setUploadingProof] = useState(false);
+
+  const lines = cart.map((item) => {
+    const product = products.find((p) => p.id === item.product_id);
+    const plan = product ? (product.plans || []).find((pl) => pl.id === item.plan_id) : null;
+    return { ...item, product, plan };
+  }).filter((l) => l.product && l.plan);
+
+  const subtotal = lines.reduce((sum, l) => sum + l.plan.price * l.qty, 0);
+  const discount = appliedCoupon
+    ? (appliedCoupon.type === "percent" ? subtotal * (appliedCoupon.value / 100) : Math.min(appliedCoupon.value, subtotal))
+    : 0;
+  const total = Math.max(0, subtotal - discount);
+  const paymentLabel = PAYMENT_OPTIONS.find((p) => p.value === payment)?.label ?? payment;
+
+  const qrForPayment = payment === "yape" ? settings.yape_qr_url : settings.bank_qr_url;
+
+  function applyCoupon() {
+    const code = couponInput.trim().toUpperCase();
+    if (!code) return;
+    const found = (coupons || []).find((c) => c.code.trim().toUpperCase() === code && c.active);
+    if (!found) {
+      setAppliedCoupon(null);
+      setCouponMsg({ ok: false, text: "Cupón no válido o inactivo." });
+      return;
+    }
+    setAppliedCoupon(found);
+    setCouponMsg({ ok: true, text: found.type === "percent" ? `✓ Cupón aplicado: -${found.value}%` : `✓ Cupón aplicado: -S/ ${found.value.toFixed(2)}` });
+  }
+  function removeCoupon() {
+    setAppliedCoupon(null); setCouponInput(""); setCouponMsg(null);
+  }
+
+  function handleProofChange(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setProofFile(file);
+    const reader = new FileReader();
+    reader.onload = () => setProofPreview(reader.result);
+    reader.readAsDataURL(file);
+  }
+
+  function handleConfirm() {
+    if (lines.length === 0) return;
+    if (!name.trim() || !phone.trim()) {
+      setError("Por favor completa tu nombre y número de WhatsApp.");
+      return;
+    }
+    if (!opCode.trim()) {
+      setError("Ingresa el código de operación / referencia de tu pago (Yape o BCP).");
+      return;
+    }
+    setError(null);
+    setLoading(true);
+
+    const proceed = (proofUrl) => {
+      const orders = lines.map((l) => ({
+        id: uid(), product_id: l.product.id, customer_name: name.trim(), customer_phone: phone.trim(),
+        payment_method: payment, plan_duration_label: l.plan.duration_label, price_at_order: l.plan.price, qty: l.qty,
+        status: "pendiente", notes: null, created_at: new Date().toISOString(),
+        coupon_code: appliedCoupon ? appliedCoupon.code : null,
+        discount_amount: appliedCoupon && subtotal > 0 ? discount * (l.plan.price * l.qty / subtotal) : 0,
+        operation_code: opCode.trim(),
+        payment_proof_url: proofUrl || null,
+        delivered_key: null,
+      }));
+      onCreateOrders(orders);
+      setLoading(false);
+
+      const itemLines = lines.map((l) => `• ${l.product.title} (${l.plan.duration_label}) x${l.qty} — S/ ${(l.plan.price * l.qty).toFixed(2)}`).join("\n");
+      const messageParts = [
+        `Hola, deseo adquirir lo siguiente:`,
+        itemLines,
+      ];
+      if (appliedCoupon) messageParts.push(`Cupón aplicado: ${appliedCoupon.code} (-S/ ${discount.toFixed(2)})`);
+      messageParts.push(`Total: S/ ${total.toFixed(2)}`, `Método de pago: ${paymentLabel}.`, `Código de operación: ${opCode.trim()}`, `Mi nombre es ${name.trim()} y mi número es ${phone.trim()}.`);
+      if (proofUrl && /^https?:\/\//.test(proofUrl)) messageParts.push(`Comprobante de pago: ${proofUrl}`);
+      else if (proofUrl) messageParts.push(`Ya adjunté mi comprobante de pago (lo verás en el panel).`);
+      const message = messageParts.join("\n");
+      const waUrl = `https://wa.me/${settings.whatsapp_number}?text=${encodeURIComponent(message)}`;
+      window.open(waUrl, "_blank");
+      onCleared();
+      onClose();
+    };
+
+    if (proofFile) {
+      setUploadingProof(true);
+      uploadImageSmart(proofFile, "comprobantes")
+        .then((url) => { setUploadingProof(false); proceed(url); })
+        .catch(() => { setUploadingProof(false); proceed(null); });
+    } else {
+      setTimeout(() => proceed(null), 300);
+    }
+  }
+
+  return (
+    <div className="fade-in" onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.7)", backdropFilter: "blur(4px)", padding: 16 }}>
+      <div className="slide-up" onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 480, borderRadius: 20, border: "1px solid var(--base-700)", background: "var(--base-900)", padding: 24, maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 600, display: "flex", alignItems: "center", gap: 8 }}><Icon.Cart style={{ width: 20, height: 20 }} /> Tu carrito</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#9ca3af", padding: 4, borderRadius: 999 }}><Icon.X style={{ width: 20, height: 20 }} /></button>
+        </div>
+
+        {lines.length === 0 ? (
+          <p style={{ textAlign: "center", padding: "32px 0", color: "#6b7280", fontSize: 14 }}>Tu carrito está vacío. Agrega productos desde la tienda.</p>
+        ) : (
+          <>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 16 }}>
+              {lines.map((l) => (
+                <div key={l.id} style={{ display: "flex", gap: 10, alignItems: "center", borderRadius: 12, border: "1px solid var(--base-700)", padding: 10 }}>
+                  <div style={{ width: 44, height: 44, borderRadius: 8, overflow: "hidden", flexShrink: 0, background: "var(--base-700)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {l.product.image_url ? <img src={l.product.image_url} alt={l.product.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Icon.ImageOff style={{ width: 16, height: 16, color: "var(--base-600)" }} />}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p className="line-clamp-1" style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{l.product.title}</p>
+                    <p style={{ margin: 0, fontSize: 11, color: "#9ca3af" }}>{l.plan.duration_label} · S/ {l.plan.price.toFixed(2)}</p>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, border: "1px solid var(--base-700)", borderRadius: 999, padding: "2px 6px" }}>
+                    <button onClick={() => onUpdateQty(l.id, Math.max(1, l.qty - 1))} style={{ background: "none", border: "none", color: "#fff", padding: 2 }}><Icon.Minus style={{ width: 12, height: 12 }} /></button>
+                    <span style={{ minWidth: 16, textAlign: "center", fontSize: 12 }}>{l.qty}</span>
+                    <button onClick={() => onUpdateQty(l.id, l.qty + 1)} style={{ background: "none", border: "none", color: "#fff", padding: 2 }}><Icon.Plus style={{ width: 12, height: 12 }} /></button>
+                  </div>
+                  <button onClick={() => onRemove(l.id)} style={{ background: "none", border: "none", color: "var(--signal-400)", padding: 4 }}><Icon.Trash style={{ width: 15, height: 15 }} /></button>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: "block", marginBottom: 6, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Código de cupón</label>
+              {appliedCoupon ? (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", borderRadius: 8, border: "1px solid var(--success-500)", background: "rgba(34,197,94,.1)", padding: "8px 12px" }}>
+                  <span style={{ fontSize: 13, color: "var(--success-500)", display: "flex", alignItems: "center", gap: 6 }}><Icon.Tag style={{ width: 14, height: 14 }} />{appliedCoupon.code}</span>
+                  <button onClick={removeCoupon} style={{ background: "none", border: "none", color: "#9ca3af", fontSize: 12 }}>Quitar</button>
+                </div>
+              ) : (
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input value={couponInput} onChange={(e) => setCouponInput(e.target.value)} placeholder="Ej: BIENVENIDA10"
+                    style={{ flex: 1, borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 13, color: "#fff", textTransform: "uppercase" }} />
+                  <button onClick={applyCoupon} style={{ borderRadius: 8, border: "1px solid var(--base-700)", background: "transparent", color: "var(--accent-400)", padding: "0 14px", fontSize: 13 }}>Aplicar</button>
+                </div>
+              )}
+              {couponMsg && <p style={{ margin: "6px 0 0", fontSize: 11, color: couponMsg.ok ? "var(--success-500)" : "var(--signal-400)" }}>{couponMsg.text}</p>}
+            </div>
+
+            <div style={{ marginBottom: 16, fontSize: 13, color: "#d1d5db" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span>Subtotal</span><span>S/ {subtotal.toFixed(2)}</span></div>
+              {appliedCoupon && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, color: "var(--success-500)" }}><span>Descuento</span><span>- S/ {discount.toFixed(2)}</span></div>}
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 700, color: "#fff", marginTop: 4 }}><span>Total</span><span>S/ {total.toFixed(2)}</span></div>
+            </div>
+
+            <label style={{ display: "block", marginBottom: 8, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Método de pago</label>
+            <div style={{ marginBottom: 16, display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+              {PAYMENT_OPTIONS.map((opt) => {
+                const IconC = opt.icon;
+                const active = payment === opt.value;
+                return (
+                  <button key={opt.value} onClick={() => setPayment(opt.value)}
+                    style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, borderRadius: 12, padding: 10, fontSize: 12,
+                      border: active ? "1px solid var(--accent-500)" : "1px solid var(--base-700)",
+                      background: active ? "rgba(34,184,255,.1)" : "transparent", color: active ? "var(--accent-400)" : "#9ca3af" }}>
+                    <IconC style={{ width: 16, height: 16 }} />{opt.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{ marginBottom: 16, borderRadius: 12, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 12, fontSize: 14, color: "#d1d5db" }}>
+              {payment === "yape" && <p style={{ margin: 0 }}>Yapea a: <span style={{ fontWeight: 600, color: "#fff" }}>{settings.yape_number ?? "—"}</span></p>}
+              {payment === "transferencia" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <p style={{ margin: 0 }}>BCP: <span style={{ fontWeight: 600, color: "#fff" }}>{settings.bank_bcp_account ?? "—"}</span></p>
+                  <p style={{ margin: 0 }}>Interbank: <span style={{ fontWeight: 600, color: "#fff" }}>{settings.bank_interbank_account ?? "—"}</span></p>
+                </div>
+              )}
+              {qrForPayment && (
+                <div style={{ marginTop: 12, display: "flex", justifyContent: "center" }}>
+                  <img src={qrForPayment} alt={`QR ${paymentLabel}`} style={{ width: 140, height: 140, objectFit: "contain", borderRadius: 12, border: "1px solid var(--base-700)", background: "#fff" }} />
+                </div>
+              )}
+            </div>
+
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: "block", marginBottom: 6, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Código de operación / Referencia (Yape o BCP)</label>
+              <input value={opCode} onChange={(e) => setOpCode(e.target.value)} placeholder="Ej: 000123456"
+                style={{ width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 13, color: "#fff" }} />
+              <p style={{ margin: "4px 0 0", fontSize: 11, color: "#6b7280" }}>Lo encuentras en el comprobante de Yape o en el detalle de tu transferencia.</p>
+            </div>
+
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: "block", marginBottom: 6, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Comprobante de pago (foto o captura, opcional)</label>
+              <input type="file" accept="image/*" onChange={handleProofChange}
+                style={{ width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "6px 8px", fontSize: 12, color: "#fff" }} />
+              {proofPreview && (
+                <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 10 }}>
+                  <img src={proofPreview} alt="Comprobante" style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 8, border: "1px solid var(--base-700)" }} />
+                  <span style={{ fontSize: 11, color: "#9ca3af", display: "flex", alignItems: "center", gap: 4 }}><Icon.Paperclip style={{ width: 12, height: 12 }} /> Comprobante adjuntado</span>
+                </div>
+              )}
+            </div>
+
+            <div style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+              <div>
+                <label style={{ display: "block", marginBottom: 4, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>Nombre</label>
+                <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Tu nombre completo"
+                  style={{ width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 14, color: "#fff" }} />
+              </div>
+              <div>
+                <label style={{ display: "block", marginBottom: 4, fontSize: 12, fontWeight: 500, color: "#9ca3af" }}>WhatsApp</label>
+                <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+51 9XX XXX XXX"
+                  style={{ width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 14, color: "#fff" }} />
+              </div>
+            </div>
+
+            {error && <p style={{ marginBottom: 12, fontSize: 12, color: "var(--signal-400)" }}>{error}</p>}
+
+            <button onClick={handleConfirm} disabled={loading || uploadingProof}
+              style={{ display: "flex", width: "100%", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 999, background: "var(--success-500)", padding: "12px", fontSize: 14, fontWeight: 600, color: "#fff", border: "none", opacity: (loading || uploadingProof) ? 0.6 : 1 }}>
+              {(loading || uploadingProof) && <Icon.Loader className="spin" style={{ width: 16, height: 16 }} />}
+              {uploadingProof ? "Subiendo comprobante..." : "Confirmar por WhatsApp"}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   FAQ — Acordeón interactivo (lee de Firestore vía db.faqs)
+   ============================================================ */
+function FAQItem({ faq, open, onToggle }) {
+  return (
+    <div style={{ borderRadius: 12, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", overflow: "hidden" }}>
+      <button onClick={onToggle} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", background: "none", border: "none", padding: "14px 16px", textAlign: "left", color: "#fff", fontSize: 14, fontWeight: 600 }}>
+        {faq.question}
+        <Icon.ChevronDown style={{ width: 16, height: 16, flexShrink: 0, marginLeft: 8, transform: open ? "rotate(180deg)" : "none", transition: "transform .2s", color: "#9ca3af" }} />
+      </button>
+      {open && <div className="fade-in" style={{ padding: "0 16px 16px", fontSize: 13, color: "#9ca3af", lineHeight: 1.6 }}>{faq.answer}</div>}
+    </div>
+  );
+}
+
+function FAQSection({ faqs }) {
+  const [openId, setOpenId] = useState(null);
+  if (!faqs || faqs.length === 0) return null;
+  const sorted = [...faqs].sort((a, b) => (a.order || 0) - (b.order || 0));
+  return (
+    <section style={{ marginTop: 56, maxWidth: 720, marginLeft: "auto", marginRight: "auto" }}>
+      <h2 style={{ margin: "0 0 20px", fontSize: 22, fontWeight: 700, textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+        <Icon.HelpCircle style={{ width: 20, height: 20, color: "var(--accent-400)" }} /> Preguntas frecuentes
+      </h2>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {sorted.map((f) => (
+          <FAQItem key={f.id} faq={f} open={openId === f.id} onToggle={() => setOpenId((v) => (v === f.id ? null : f.id))} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/* ============================================================
    TIENDA PÚBLICA
    ============================================================ */
+const CART_KEY = "digitalstore_cart_v1";
+
+function loadCart() {
+  try {
+    const raw = localStorage.getItem(CART_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  return [];
+}
+function saveCart(cart) {
+  try { localStorage.setItem(CART_KEY, JSON.stringify(cart)); } catch (e) {}
+}
+
 function StorePage({ db, setDb }) {
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState(null);
-  const [selectedProduct, setSelectedProduct] = useState(null);
+  const [detailProduct, setDetailProduct] = useState(null);
+  const [cartOpen, setCartOpen] = useState(false);
+  const [cart, setCart] = useState(loadCart);
+  const [toast, setToast] = useState(null);
+
+  useEffect(() => { saveCart(cart); }, [cart]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 2200);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  // Sincroniza el catálogo (productos y categorías) desde Google Sheets al
+  // abrir la tienda, y luego cada 5 minutos mientras siga abierta — así los
+  // cambios de precio/stock/descripción que hagas en la hoja se reflejan
+  // sin que nadie tenga que tocar el panel Admin. No hace nada si no
+  // configuraste la URL del CSV en Admin → Configuración.
+  useEffect(() => {
+    const csvUrl = db.settings.sheet_csv_url;
+    const couponsUrl = db.settings.sheet_coupons_csv_url;
+    if (!csvUrl && !couponsUrl) return;
+    const runSync = () => {
+      if (csvUrl) syncCatalogFromSheet(csvUrl, setDb);
+      if (couponsUrl) syncCouponsFromSheet(couponsUrl, setDb);
+    };
+    runSync();
+    const interval = setInterval(runSync, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [db.settings.sheet_csv_url, db.settings.sheet_coupons_csv_url]);
 
   const activeProducts = useMemo(() => db.products.filter((p) => p.is_active), [db.products]);
 
   const filteredProducts = useMemo(() => activeProducts.filter((p) => {
-    const matchesSearch = p.title.toLowerCase().includes(search.toLowerCase());
+    const q = search.toLowerCase();
+    const matchesSearch = p.title.toLowerCase().includes(q) || (p.description || "").toLowerCase().includes(q);
     const matchesCategory = !activeCategory || db.categories.find((c) => c.id === p.category_id)?.slug === activeCategory;
     return matchesSearch && matchesCategory;
   }), [activeProducts, db.categories, search, activeCategory]);
 
-  function handleCreateOrder(order) {
+  function addToCart(product, planId, qty) {
+    setCart((prev) => {
+      const existing = prev.find((it) => it.product_id === product.id && it.plan_id === planId);
+      if (existing) {
+        return prev.map((it) => it.id === existing.id ? { ...it, qty: it.qty + qty } : it);
+      }
+      return [...prev, { id: uid(), product_id: product.id, plan_id: planId, qty }];
+    });
+    setToast(`✓ "${product.title}" añadido al carrito`);
+  }
+
+  function updateCartQty(itemId, qty) {
+    setCart((prev) => prev.map((it) => it.id === itemId ? { ...it, qty } : it));
+  }
+  function removeFromCart(itemId) {
+    setCart((prev) => prev.filter((it) => it.id !== itemId));
+  }
+
+  function handleCreateOrders(orders) {
     setDb((prev) => {
-      const next = { ...prev, orders: [order, ...prev.orders] };
+      const next = { ...prev, orders: [...orders, ...prev.orders] };
       saveDB(next);
       return next;
     });
+    const productsById = Object.fromEntries(db.products.map((p) => [p.id, p]));
+    const ordersWithTitle = orders.map((o) => ({ ...o, product_title: (productsById[o.product_id] || {}).title || "" }));
+    sendToSheet(db.settings.sheet_orders_webhook_url, "order", ordersWithTitle);
   }
+
+  function handleAddReview(review) {
+    setDb((prev) => {
+      const next = { ...prev, reviews: [review, ...(prev.reviews || [])] };
+      saveDB(next);
+      return next;
+    });
+    const product = db.products.find((p) => p.id === review.product_id);
+    sendToSheet(db.settings.sheet_orders_webhook_url, "review", [{ ...review, product_title: product ? product.title : "" }]);
+  }
+
+  const cartCount = cart.reduce((sum, it) => sum + it.qty, 0);
 
   return (
     <div style={{ minHeight: "100vh" }}>
-      <Header categories={db.categories} search={search} onSearchChange={setSearch} activeCategory={activeCategory} onCategoryChange={setActiveCategory} whatsappNumber={db.settings.whatsapp_number} />
+      <Header categories={db.categories} search={search} onSearchChange={setSearch} activeCategory={activeCategory} onCategoryChange={setActiveCategory}
+        whatsappNumber={db.settings.whatsapp_number} cartCount={cartCount} onOpenCart={() => setCartOpen(true)} announcement={db.settings.announcement} />
       <main style={{ maxWidth: 1280, margin: "0 auto", padding: "32px 16px" }}>
         <section style={{ marginBottom: 40, textAlign: "center" }}>
           <h1 style={{ margin: "0 0 8px", fontSize: 30, fontWeight: 700, color: "#fff" }}>Productos y suscripciones digitales</h1>
-          <p style={{ margin: 0, color: "#9ca3af" }}>Membresías, cursos, licencias y plantillas — pago fácil con Yape, Plin o transferencia.</p>
+          <p style={{ margin: 0, color: "#9ca3af" }}>Membresías, cursos, licencias y plantillas — pago fácil con Yape o transferencia BCP.</p>
         </section>
-        <CatalogGrid products={filteredProducts} onSelect={setSelectedProduct} />
+        <CatalogGrid products={filteredProducts} onSelect={setDetailProduct} onQuickAdd={addToCart} />
+        <FAQSection faqs={db.faqs || []} />
       </main>
       <footer style={{ borderTop: "1px solid var(--base-700)", padding: "24px 16px", textAlign: "center", color: "#6b7280", fontSize: 12 }}>
-        <p style={{ margin: 0 }}>DigitalStore Perú — Demo local (sin backend). <a href="#/admin" style={{ color: "var(--accent-400)" }}>Panel admin</a></p>
+        <p style={{ margin: 0 }}>DigitalStore Perú</p>
       </footer>
-      <CheckoutModal product={selectedProduct} settings={db.settings} onClose={() => setSelectedProduct(null)} onCreateOrder={handleCreateOrder} />
+
+      {detailProduct && (
+        <ProductDetailModal
+          product={detailProduct}
+          allProducts={activeProducts}
+          reviews={db.reviews || []}
+          onAddReview={handleAddReview}
+          onClose={() => setDetailProduct(null)}
+          onAddToCart={addToCart}
+          onSelectProduct={setDetailProduct}
+        />
+      )}
+
+      {cartOpen && (
+        <CartModal
+          cart={cart}
+          products={db.products}
+          settings={db.settings}
+          coupons={db.coupons || []}
+          onClose={() => setCartOpen(false)}
+          onUpdateQty={updateCartQty}
+          onRemove={removeFromCart}
+          onCreateOrders={handleCreateOrders}
+          onCleared={() => setCart([])}
+        />
+      )}
+
+      {toast && (
+        <div className="fade-in" style={{ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 60, background: "var(--success-500)", color: "#fff", padding: "10px 20px", borderRadius: 999, fontSize: 13, fontWeight: 500, boxShadow: "0 8px 20px rgba(0,0,0,.4)" }}>
+          {toast}
+        </div>
+      )}
     </div>
   );
 }
@@ -698,7 +1673,11 @@ function AdminSidebar({ section, onNavigate, onLogout }) {
   const items = [
     { key: "dashboard", label: "Dashboard", icon: Icon.Grid },
     { key: "products", label: "Productos", icon: Icon.Box },
+    { key: "categories", label: "Categorías", icon: Icon.Tag },
     { key: "orders", label: "Órdenes", icon: Icon.List },
+    { key: "coupons", label: "Cupones", icon: Icon.Tag },
+    { key: "reviews", label: "Reseñas", icon: Icon.Star },
+    { key: "faq", label: "FAQ", icon: Icon.HelpCircle },
     { key: "settings", label: "Configuración", icon: Icon.Settings },
   ];
   return (
@@ -740,7 +1719,7 @@ function AdminDashboard({ db }) {
   const totalOrders = db.orders.length;
   const pending = db.orders.filter((o) => o.status === "pendiente").length;
   const paid = db.orders.filter((o) => o.status === "pagado" || o.status === "entregado").length;
-  const revenue = db.orders.filter((o) => o.status === "pagado" || o.status === "entregado").reduce((s, o) => s + o.price_at_order, 0);
+  const revenue = db.orders.filter((o) => o.status === "pagado" || o.status === "entregado").reduce((s, o) => s + o.price_at_order * (o.qty || 1), 0);
 
   return (
     <div>
@@ -764,7 +1743,41 @@ const STATUS_STYLES = {
   cancelado: { bg: "rgba(255,45,77,.15)", color: "var(--signal-400)" },
 };
 
-function OrdersTable({ db, orders, onChangeStatus, compact }) {
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).catch(() => {});
+}
+
+/* Botones de estado con color propio — reemplaza el desplegable: un
+   click y cambia, sin depender de ningún control nativo del navegador. */
+function StatusButtons({ value, onChange }) {
+  const options = [
+    { value: "pendiente", label: "Pendiente", color: "var(--accent-400)", bg: "rgba(34,184,255,.15)" },
+    { value: "pagado", label: "Pagado", color: "var(--success-500)", bg: "rgba(34,197,94,.15)" },
+    { value: "entregado", label: "Entregado", color: "#22c55e", bg: "rgba(34,197,94,.35)" },
+    { value: "cancelado", label: "Cancelado", color: "var(--signal-400)", bg: "rgba(255,45,77,.15)" },
+  ];
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+      {options.map((o) => {
+        const active = o.value === value;
+        return (
+          <button key={o.value} type="button" onClick={() => onChange(o.value)}
+            style={{
+              border: active ? `1px solid ${o.color}` : "1px solid var(--base-700)",
+              background: active ? o.bg : "transparent",
+              color: active ? o.color : "#6b7280",
+              borderRadius: 999, padding: "3px 10px", fontSize: 11, fontWeight: active ? 700 : 500,
+              cursor: "pointer", transition: "all .15s",
+            }}>
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function OrdersTable({ db, orders, onChangeStatus, onDeleteOrder, compact }) {
   return (
     <div style={{ overflowX: "auto", borderRadius: 12, border: "1px solid var(--base-700)" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
@@ -774,7 +1787,11 @@ function OrdersTable({ db, orders, onChangeStatus, compact }) {
             <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Cliente</th>
             <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Pago</th>
             <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Precio</th>
+            {!compact && <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Cód. operación</th>}
+            {!compact && <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Comprobante</th>}
             <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Estado</th>
+            {!compact && <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Clave/Licencia</th>}
+            {!compact && onDeleteOrder && <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}></th>}
           </tr>
         </thead>
         <tbody>
@@ -783,28 +1800,61 @@ function OrdersTable({ db, orders, onChangeStatus, compact }) {
             const s = STATUS_STYLES[o.status] || STATUS_STYLES.pendiente;
             return (
               <tr key={o.id} style={{ borderTop: "1px solid var(--base-700)" }}>
-                <td style={{ padding: "10px 12px" }}>{product ? product.title : "—"}{o.plan_duration_label && <><br /><span style={{ color: "#6b7280", fontSize: 11 }}>{o.plan_duration_label}</span></>}</td>
+                <td style={{ padding: "10px 12px" }}>{product ? product.title : "—"}{o.plan_duration_label && <><br /><span style={{ color: "#6b7280", fontSize: 11 }}>{o.plan_duration_label}{o.qty > 1 ? ` · x${o.qty}` : ""}</span></>}</td>
                 <td style={{ padding: "10px 12px" }}>{o.customer_name}<br /><span style={{ color: "#6b7280", fontSize: 11 }}>{o.customer_phone}</span></td>
                 <td style={{ padding: "10px 12px", textTransform: "capitalize" }}>{o.payment_method}</td>
-                <td style={{ padding: "10px 12px" }}>S/ {o.price_at_order.toFixed(2)}</td>
+                <td style={{ padding: "10px 12px" }}>
+                  S/ {(o.price_at_order * (o.qty || 1) - (o.discount_amount || 0)).toFixed(2)}
+                  {o.coupon_code && <><br /><span style={{ color: "#6b7280", fontSize: 11 }}>cupón: {o.coupon_code}</span></>}
+                </td>
+                {!compact && (
+                  <td style={{ padding: "10px 12px" }}>
+                    {o.operation_code ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <code style={{ fontSize: 11, background: "var(--base-800)", padding: "2px 6px", borderRadius: 4 }}>{o.operation_code}</code>
+                        <button title="Copiar" onClick={() => copyText(o.operation_code)} style={{ background: "none", border: "none", color: "var(--accent-400)", padding: 2 }}><Icon.Copy style={{ width: 13, height: 13 }} /></button>
+                      </div>
+                    ) : <span style={{ color: "#6b7280" }}>—</span>}
+                  </td>
+                )}
+                {!compact && (
+                  <td style={{ padding: "10px 12px" }}>
+                    {o.payment_proof_url ? (
+                      <a href={o.payment_proof_url} target="_blank" rel="noopener noreferrer"><img src={o.payment_proof_url} alt="Comprobante" style={{ width: 36, height: 36, objectFit: "cover", borderRadius: 6, border: "1px solid var(--base-700)" }} /></a>
+                    ) : <span style={{ color: "#6b7280" }}>—</span>}
+                  </td>
+                )}
                 <td style={{ padding: "10px 12px" }}>
                   {compact || !onChangeStatus ? (
                     <span style={{ borderRadius: 999, padding: "4px 10px", fontSize: 11, background: s.bg, color: s.color }}>{o.status}</span>
                   ) : (
-                    <select value={o.status} onChange={(e) => onChangeStatus(o.id, e.target.value)}
-                      style={{ borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", color: "#fff", padding: "4px 8px", fontSize: 12 }}>
-                      <option value="pendiente">pendiente</option>
-                      <option value="pagado">pagado</option>
-                      <option value="entregado">entregado</option>
-                      <option value="cancelado">cancelado</option>
-                    </select>
+                    <StatusButtons value={o.status} onChange={(v) => onChangeStatus(o.id, v)} />
                   )}
                 </td>
+                {!compact && (
+                  <td style={{ padding: "10px 12px" }}>
+                    {o.delivered_key ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <code style={{ fontSize: 11, background: "var(--base-800)", padding: "2px 6px", borderRadius: 4 }}>{o.delivered_key}</code>
+                        <button title="Copiar" onClick={() => copyText(o.delivered_key)} style={{ background: "none", border: "none", color: "var(--accent-400)", padding: 2 }}><Icon.Copy style={{ width: 13, height: 13 }} /></button>
+                        <a title="Enviar por WhatsApp" href={`https://wa.me/${(o.customer_phone || "").replace(/\D/g, "")}?text=${encodeURIComponent(`Hola ${o.customer_name}, aquí tienes tu clave/licencia de "${product ? product.title : ""}":\n${o.delivered_key}`)}`} target="_blank" rel="noopener noreferrer" style={{ color: "var(--success-500)", display: "flex" }}><Icon.WhatsApp style={{ width: 13, height: 13 }} /></a>
+                      </div>
+                    ) : <span style={{ color: "#6b7280" }}>—</span>}
+                  </td>
+                )}
+                {!compact && onDeleteOrder && (
+                  <td style={{ padding: "10px 12px" }}>
+                    <button title="Eliminar pedido" onClick={() => onDeleteOrder(o.id)}
+                      style={{ background: "none", border: "1px solid var(--base-700)", color: "var(--signal-400)", borderRadius: 8, padding: "5px 8px", cursor: "pointer", display: "flex", alignItems: "center" }}>
+                      <Icon.Trash style={{ width: 13, height: 13 }} />
+                    </button>
+                  </td>
+                )}
               </tr>
             );
           })}
           {orders.length === 0 && (
-            <tr><td colSpan="5" style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>Sin órdenes todavía.</td></tr>
+            <tr><td colSpan={compact ? 4 : (onDeleteOrder ? 9 : 8)} style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>Sin órdenes todavía.</td></tr>
           )}
         </tbody>
       </table>
@@ -813,22 +1863,60 @@ function OrdersTable({ db, orders, onChangeStatus, compact }) {
 }
 
 function AdminOrders({ db, setDb }) {
+  const [toast, setToast] = useState(null);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
   function handleChangeStatus(orderId, status) {
     setDb((prev) => {
-      const next = { ...prev, orders: prev.orders.map((o) => (o.id === orderId ? { ...o, status } : o)) };
+      const order = prev.orders.find((o) => o.id === orderId);
+      let products = prev.products;
+      let deliveredKey = order ? order.delivered_key : null;
+
+      // Punto 8: al pasar un pedido a "pagado" o "entregado" (Completado/Pagado),
+      // si el producto maneja inventario de claves/licencias, se descuenta
+      // automáticamente una clave del stock y se adjunta al pedido.
+      const becomingCompleted = (status === "pagado" || status === "entregado");
+      if (order && becomingCompleted && !order.delivered_key) {
+        const product = prev.products.find((p) => p.id === order.product_id);
+        if (product && Array.isArray(product.license_keys) && product.license_keys.length > 0) {
+          const [nextKey, ...restKeys] = product.license_keys;
+          deliveredKey = nextKey;
+          products = prev.products.map((p) => p.id === product.id ? { ...p, license_keys: restKeys, stock: restKeys.length } : p);
+          setToast(`✓ Clave asignada automáticamente al pedido de ${order.customer_name}`);
+        }
+      }
+
+      const orders = prev.orders.map((o) => (o.id === orderId ? { ...o, status, delivered_key: deliveredKey } : o));
+      const next = { ...prev, orders, products };
       saveDB(next);
       return next;
     });
   }
+
+  function handleDeleteOrder(orderId) {
+    if (!confirm("¿Eliminar este pedido? Esta acción no se puede deshacer.")) return;
+    setDb((prev) => {
+      const next = { ...prev, orders: prev.orders.filter((o) => o.id !== orderId) };
+      saveDB(next);
+      return next;
+    });
+  }
+
   return (
     <div>
       <h1 style={{ margin: "0 0 20px", fontSize: 22, fontWeight: 700 }}>Órdenes</h1>
-      <OrdersTable db={db} orders={db.orders} onChangeStatus={handleChangeStatus} />
+      {toast && <div className="fade-in" style={{ marginBottom: 16, borderRadius: 10, border: "1px solid var(--success-500)", background: "rgba(34,197,94,.1)", color: "var(--success-500)", padding: "8px 14px", fontSize: 12 }}>{toast}</div>}
+      <OrdersTable db={db} orders={db.orders} onChangeStatus={handleChangeStatus} onDeleteOrder={handleDeleteOrder} />
     </div>
   );
 }
 
-const emptyProductForm = { title: "", stock: "0", category_id: "", image_url: "", features: "", is_active: true, plans: [{ id: uid(), duration_label: "1 mes", price: "" }] };
+const emptyProductForm = { title: "", description: "", stock: "0", category_id: "", image_url: "", features: "", is_active: true, plans: [{ id: uid(), duration_label: "1 mes", price: "" }], license_keys: "" };
 
 /* Lee un archivo de imagen, lo redimensiona (máx 800px de ancho) y lo comprime
    a JPEG para que quepa cómodamente en localStorage como data URL. */
@@ -862,9 +1950,10 @@ function AdminProducts({ db, setDb }) {
   function startNew() { setForm(emptyProductForm); setImgError(null); setEditing("new"); }
   function startEdit(p) {
     setForm({
-      title: p.title, stock: String(p.stock), category_id: p.category_id || "", image_url: p.image_url || "",
+      title: p.title, description: p.description || "", stock: String(p.stock), category_id: p.category_id || "", image_url: p.image_url || "",
       features: p.features.join(", "), is_active: p.is_active,
       plans: (p.plans || []).map((pl) => ({ id: pl.id, duration_label: pl.duration_label, price: String(pl.price) })),
+      license_keys: (p.license_keys || []).join("\n"),
     });
     setImgError(null);
     setEditing(p.id);
@@ -887,19 +1976,23 @@ function AdminProducts({ db, setDb }) {
     if (!form.title.trim() || validPlans.length === 0) return;
     const featuresArr = form.features.split(",").map((s) => s.trim()).filter(Boolean);
     const plansArr = validPlans.map((pl) => ({ id: pl.id, duration_label: pl.duration_label.trim(), price: parseFloat(pl.price) || 0 }));
+    const licenseKeysArr = form.license_keys.split("\n").map((s) => s.trim()).filter(Boolean);
+    // Si el admin gestiona claves/licencias, el stock lo dicta automáticamente
+    // la cantidad de claves disponibles (así nunca se vende algo que ya no hay).
+    const effectiveStock = licenseKeysArr.length > 0 ? licenseKeysArr.length : (parseInt(form.stock) || 0);
     setDb((prev) => {
       let products;
       if (editing === "new") {
         const newProduct = {
           id: uid(), title: form.title.trim(), slug: form.title.trim().toLowerCase().replace(/\s+/g, "-"),
-          category_id: form.category_id || null, description: "", image_url: form.image_url || null,
-          stock: parseInt(form.stock) || 0, is_active: form.is_active, features: featuresArr, plans: plansArr,
+          category_id: form.category_id || null, description: form.description.trim(), image_url: form.image_url || null,
+          stock: effectiveStock, is_active: form.is_active, features: featuresArr, plans: plansArr, license_keys: licenseKeysArr,
         };
         products = [newProduct, ...prev.products];
       } else {
         products = prev.products.map((p) => p.id === editing ? {
-          ...p, title: form.title.trim(), category_id: form.category_id || null, image_url: form.image_url || null,
-          stock: parseInt(form.stock) || 0, is_active: form.is_active, features: featuresArr, plans: plansArr,
+          ...p, title: form.title.trim(), category_id: form.category_id || null, description: form.description.trim(), image_url: form.image_url || null,
+          stock: effectiveStock, is_active: form.is_active, features: featuresArr, plans: plansArr, license_keys: licenseKeysArr,
         } : p);
       }
       const next = { ...prev, products };
@@ -926,7 +2019,7 @@ function AdminProducts({ db, setDb }) {
     });
   }
 
-  const inputStyle = { width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 13, color: "#fff" };
+  const inputStyle = { width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 13, color: "#fff", colorScheme: "dark" };
   const labelStyle = { display: "block", marginBottom: 4, fontSize: 12, color: "#9ca3af" };
 
   return (
@@ -946,10 +2039,12 @@ function AdminProducts({ db, setDb }) {
             <div><label style={labelStyle}>Stock</label><input type="number" style={inputStyle} value={form.stock} onChange={(e) => setForm({ ...form, stock: e.target.value })} /></div>
             <div>
               <label style={labelStyle}>Categoría</label>
-              <select style={inputStyle} value={form.category_id} onChange={(e) => setForm({ ...form, category_id: e.target.value })}>
-                <option value="">Sin categoría</option>
-                {db.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
+              <Dropdown
+                value={form.category_id}
+                onChange={(v) => setForm({ ...form, category_id: v })}
+                buttonStyle={{ width: "100%" }}
+                options={[{ value: "", label: "Sin categoría" }, ...db.categories.map((c) => ({ value: c.id, label: c.name }))]}
+              />
             </div>
             <div>
               <label style={labelStyle}>Imagen del producto</label>
@@ -971,6 +2066,13 @@ function AdminProducts({ db, setDb }) {
           </div>
 
           <div style={{ marginBottom: 12 }}>
+            <label style={labelStyle}>Descripción</label>
+            <textarea rows={3} style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} value={form.description}
+              onChange={(e) => setForm({ ...form, description: e.target.value })}
+              placeholder="Describe el producto: qué incluye, para quién es, qué lo hace especial..." />
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
             <label style={labelStyle}>Planes de duración y precio</label>
             <p style={{ margin: "0 0 8px", fontSize: 11, color: "#6b7280" }}>Elige tú qué duraciones ofrecer para este producto (1 mes, 2 meses, 3 meses, por año, etc.). No hace falta agregar todas — solo las que apliquen.</p>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -978,11 +2080,12 @@ function AdminProducts({ db, setDb }) {
                 const isPreset = DURATION_PRESETS.includes(pl.duration_label);
                 return (
                   <div key={pl.id} style={{ display: "grid", gridTemplateColumns: isPreset ? "1fr 1fr auto" : "1fr 1fr 1fr auto", gap: 8, alignItems: "center" }}>
-                    <select style={inputStyle} value={isPreset ? pl.duration_label : "custom"}
-                      onChange={(e) => updatePlan(pl.id, { duration_label: e.target.value === "custom" ? "" : e.target.value })}>
-                      {DURATION_PRESETS.map((d) => <option key={d} value={d}>{d}</option>)}
-                      <option value="custom">Personalizada…</option>
-                    </select>
+                    <Dropdown
+                      value={isPreset ? pl.duration_label : "custom"}
+                      onChange={(v) => updatePlan(pl.id, { duration_label: v === "custom" ? "" : v })}
+                      buttonStyle={{ width: "100%" }}
+                      options={[...DURATION_PRESETS.map((d) => ({ value: d, label: d })), { value: "custom", label: "Personalizada…" }]}
+                    />
                     {!isPreset && (
                       <input style={inputStyle} placeholder="Ej: 2 meses" value={pl.duration_label} onChange={(e) => updatePlan(pl.id, { duration_label: e.target.value })} />
                     )}
@@ -1009,6 +2112,15 @@ function AdminProducts({ db, setDb }) {
           <div style={{ marginBottom: 12 }}>
             <label style={labelStyle}>Características (separadas por coma)</label>
             <input style={inputStyle} value={form.features} onChange={(e) => setForm({ ...form, features: e.target.value })} placeholder="Ej: Acceso ilimitado, Soporte 24/7" />
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <label style={labelStyle}><Icon.Key style={{ width: 12, height: 12, display: "inline", marginRight: 4, verticalAlign: "-1px" }} />Claves / licencias digitales (una por línea, opcional)</label>
+            <textarea rows={4} style={{ ...inputStyle, resize: "vertical", fontFamily: "monospace", fontSize: 12 }} value={form.license_keys}
+              onChange={(e) => setForm({ ...form, license_keys: e.target.value })}
+              placeholder={"XXXX-XXXX-XXXX-XXXX\nYYYY-YYYY-YYYY-YYYY"} />
+            <p style={{ margin: "6px 0 0", fontSize: 11, color: "#6b7280" }}>
+              Si llenas este campo, el stock se calcula automáticamente según cuántas claves quedan (una se descuenta y se entrega sola cada vez que marcas un pedido como pagado/entregado). Déjalo vacío para llevar el stock manualmente.
+            </p>
           </div>
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#d1d5db", marginBottom: 16 }}>
             <input type="checkbox" checked={form.is_active} onChange={(e) => setForm({ ...form, is_active: e.target.checked })} /> Activo (visible en la tienda)
@@ -1060,10 +2172,375 @@ function AdminProducts({ db, setDb }) {
   );
 }
 
+/* ============================================================
+   ADMIN — CATEGORÍAS (100% dinámico, reemplaza SEED_CATEGORIES)
+   ============================================================ */
+const emptyCategoryForm = { name: "", slug: "", icon: "" };
+
+function AdminCategories({ db, setDb }) {
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState(emptyCategoryForm);
+  const [uploading, setUploading] = useState(false);
+
+  const inputStyle = { width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 13, color: "#fff", colorScheme: "dark" };
+  const labelStyle = { display: "block", marginBottom: 4, fontSize: 12, color: "#9ca3af" };
+
+  function startNew() { setForm(emptyCategoryForm); setEditing("new"); }
+  function startEdit(c) { setForm({ name: c.name, slug: c.slug, icon: c.icon || "" }); setEditing(c.id); }
+  function cancel() { setEditing(null); setForm(emptyCategoryForm); }
+
+  function slugify(s) { return s.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, ""); }
+
+  function save() {
+    if (!form.name.trim()) return;
+    const slug = form.slug.trim() ? slugify(form.slug) : slugify(form.name);
+    setDb((prev) => {
+      let categories;
+      if (editing === "new") {
+        categories = [...prev.categories, { id: uid(), name: form.name.trim(), slug, icon: form.icon.trim() }];
+      } else {
+        categories = prev.categories.map((c) => c.id === editing ? { ...c, name: form.name.trim(), slug, icon: form.icon.trim() } : c);
+      }
+      const next = { ...prev, categories };
+      saveDB(next);
+      return next;
+    });
+    cancel();
+  }
+
+  function remove(id) {
+    if (!confirm("¿Eliminar esta categoría? Los productos que la usan quedarán sin categoría.")) return;
+    setDb((prev) => {
+      const next = {
+        ...prev,
+        categories: prev.categories.filter((c) => c.id !== id),
+        products: prev.products.map((p) => (p.category_id === id ? { ...p, category_id: null } : p)),
+      };
+      saveDB(next);
+      return next;
+    });
+  }
+
+  function handleIconFile(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setUploading(true);
+    uploadImageSmart(file, "categorias").then((url) => { setForm((f) => ({ ...f, icon: url })); setUploading(false); }).catch(() => setUploading(false));
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>Categorías</h1>
+        <button onClick={startNew} style={{ display: "flex", alignItems: "center", gap: 6, borderRadius: 999, border: "none", background: "var(--accent-500)", color: "#05060a", padding: "8px 14px", fontSize: 13, fontWeight: 600 }}>
+          <Icon.Plus style={{ width: 14, height: 14 }} /> Nueva categoría
+        </button>
+      </div>
+
+      {editing && (
+        <div className="fade-in" style={{ marginBottom: 24, borderRadius: 16, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 20, maxWidth: 480 }}>
+          <h2 style={{ marginTop: 0, fontSize: 15, fontWeight: 600 }}>{editing === "new" ? "Nueva categoría" : "Editar categoría"}</h2>
+          <div style={{ marginBottom: 12 }}><label style={labelStyle}>Nombre</label><input style={inputStyle} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ej: Cursos Online" /></div>
+          <div style={{ marginBottom: 12 }}><label style={labelStyle}>Slug (opcional, se genera solo)</label><input style={inputStyle} value={form.slug} onChange={(e) => setForm({ ...form, slug: e.target.value })} placeholder="cursos-online" /></div>
+          <div style={{ marginBottom: 12 }}>
+            <label style={labelStyle}>Ícono (emoji, ej: 🎓) o imagen</label>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input style={{ ...inputStyle, maxWidth: 120 }} value={form.icon && !form.icon.startsWith("http") ? form.icon : ""} onChange={(e) => setForm({ ...form, icon: e.target.value })} placeholder="🎓" />
+              <input type="file" accept="image/*" onChange={handleIconFile} style={{ fontSize: 12 }} />
+            </div>
+            {uploading && <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--accent-400)" }}>Subiendo imagen...</p>}
+            {form.icon && form.icon.startsWith("http") && (
+              <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                <img src={form.icon} alt="ícono" style={{ width: 32, height: 32, borderRadius: 6, objectFit: "cover" }} />
+                <button type="button" onClick={() => setForm((f) => ({ ...f, icon: "" }))} style={{ background: "none", border: "1px solid var(--base-700)", color: "#9ca3af", borderRadius: 999, padding: "2px 10px", fontSize: 11 }}>Quitar</button>
+              </div>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={save} disabled={!form.name.trim()} style={{ borderRadius: 999, border: "none", background: "var(--success-500)", color: "#fff", padding: "8px 16px", fontSize: 13, fontWeight: 600, opacity: !form.name.trim() ? 0.5 : 1 }}>Guardar</button>
+            <button onClick={cancel} style={{ borderRadius: 999, border: "1px solid var(--base-700)", background: "transparent", color: "#9ca3af", padding: "8px 16px", fontSize: 13 }}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 12 }}>
+        {db.categories.map((c) => (
+          <div key={c.id} style={{ borderRadius: 12, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 14, display: "flex", alignItems: "center", gap: 10 }}>
+            {c.icon && c.icon.startsWith("http") ? <img src={c.icon} alt="" style={{ width: 28, height: 28, borderRadius: 6, objectFit: "cover" }} /> : <span style={{ fontSize: 22 }}>{c.icon || "📦"}</span>}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }} className="line-clamp-1">{c.name}</p>
+              <p style={{ margin: 0, fontSize: 11, color: "#6b7280" }}>{c.slug}</p>
+            </div>
+            <button onClick={() => startEdit(c)} style={{ background: "none", border: "none", color: "var(--accent-400)", padding: 4 }}><Icon.Edit style={{ width: 14, height: 14 }} /></button>
+            <button onClick={() => remove(c.id)} style={{ background: "none", border: "none", color: "var(--signal-400)", padding: 4 }}><Icon.Trash style={{ width: 14, height: 14 }} /></button>
+          </div>
+        ))}
+        {db.categories.length === 0 && <p style={{ color: "#6b7280", fontSize: 13 }}>Sin categorías todavía.</p>}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   ADMIN — CUPONES DE DESCUENTO
+   ============================================================ */
+const emptyCouponForm = { code: "", type: "percent", value: "", active: true };
+
+function AdminCoupons({ db, setDb }) {
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState(emptyCouponForm);
+  const inputStyle = { width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 13, color: "#fff", colorScheme: "dark" };
+  const labelStyle = { display: "block", marginBottom: 4, fontSize: 12, color: "#9ca3af" };
+
+  function startNew() { setForm(emptyCouponForm); setEditing("new"); }
+  function startEdit(c) { setForm({ code: c.code, type: c.type, value: String(c.value), active: c.active }); setEditing(c.id); }
+  function cancel() { setEditing(null); setForm(emptyCouponForm); }
+
+  function save() {
+    if (!form.code.trim() || form.value === "") return;
+    const data = { code: form.code.trim().toUpperCase(), type: form.type, value: parseFloat(form.value) || 0, active: form.active };
+    setDb((prev) => {
+      let coupons = prev.coupons || [];
+      coupons = editing === "new" ? [{ id: uid(), ...data }, ...coupons] : coupons.map((c) => c.id === editing ? { ...c, ...data } : c);
+      const next = { ...prev, coupons };
+      saveDB(next);
+      return next;
+    });
+    cancel();
+  }
+  function remove(id) {
+    if (!confirm("¿Eliminar este cupón?")) return;
+    setDb((prev) => { const next = { ...prev, coupons: (prev.coupons || []).filter((c) => c.id !== id) }; saveDB(next); return next; });
+  }
+  function toggleActive(id) {
+    setDb((prev) => { const next = { ...prev, coupons: (prev.coupons || []).map((c) => c.id === id ? { ...c, active: !c.active } : c) }; saveDB(next); return next; });
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>Cupones de descuento</h1>
+        <button onClick={startNew} style={{ display: "flex", alignItems: "center", gap: 6, borderRadius: 999, border: "none", background: "var(--accent-500)", color: "#05060a", padding: "8px 14px", fontSize: 13, fontWeight: 600 }}>
+          <Icon.Plus style={{ width: 14, height: 14 }} /> Nuevo cupón
+        </button>
+      </div>
+
+      {editing && (
+        <div className="fade-in" style={{ marginBottom: 24, borderRadius: 16, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 20, maxWidth: 420 }}>
+          <h2 style={{ marginTop: 0, fontSize: 15, fontWeight: 600 }}>{editing === "new" ? "Nuevo cupón" : "Editar cupón"}</h2>
+          <div style={{ marginBottom: 12 }}><label style={labelStyle}>Código</label><input style={{ ...inputStyle, textTransform: "uppercase" }} value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="BIENVENIDA10" /></div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+            <div>
+              <label style={labelStyle}>Tipo</label>
+              <Dropdown
+                value={form.type}
+                onChange={(v) => setForm({ ...form, type: v })}
+                buttonStyle={{ width: "100%" }}
+                options={[
+                  { value: "percent", label: "Porcentaje (%)" },
+                  { value: "fixed", label: "Monto fijo (S/)" },
+                ]}
+              />
+            </div>
+            <div><label style={labelStyle}>Valor</label><input type="number" style={inputStyle} value={form.value} onChange={(e) => setForm({ ...form, value: e.target.value })} placeholder={form.type === "percent" ? "10" : "5.00"} /></div>
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#d1d5db", marginBottom: 16 }}>
+            <input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} /> Activo
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={save} disabled={!form.code.trim() || form.value === ""} style={{ borderRadius: 999, border: "none", background: "var(--success-500)", color: "#fff", padding: "8px 16px", fontSize: 13, fontWeight: 600, opacity: (!form.code.trim() || form.value === "") ? 0.5 : 1 }}>Guardar</button>
+            <button onClick={cancel} style={{ borderRadius: 999, border: "1px solid var(--base-700)", background: "transparent", color: "#9ca3af", padding: "8px 16px", fontSize: 13 }}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ overflowX: "auto", borderRadius: 12, border: "1px solid var(--base-700)" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead><tr style={{ background: "var(--base-800)", textAlign: "left" }}>
+            <th style={{ padding: "10px 12px", color: "#9ca3af", fontWeight: 500 }}>Código</th>
+            <th style={{ padding: "10px 12px", color: "#9ca3af", fontWeight: 500 }}>Descuento</th>
+            <th style={{ padding: "10px 12px", color: "#9ca3af", fontWeight: 500 }}>Estado</th>
+            <th style={{ padding: "10px 12px", color: "#9ca3af", fontWeight: 500 }}></th>
+          </tr></thead>
+          <tbody>
+            {(db.coupons || []).map((c) => (
+              <tr key={c.id} style={{ borderTop: "1px solid var(--base-700)" }}>
+                <td style={{ padding: "10px 12px", fontWeight: 600 }}>{c.code}</td>
+                <td style={{ padding: "10px 12px" }}>{c.type === "percent" ? `${c.value}%` : `S/ ${c.value.toFixed(2)}`}</td>
+                <td style={{ padding: "10px 12px" }}>
+                  <button onClick={() => toggleActive(c.id)} style={{ borderRadius: 999, border: "none", padding: "4px 10px", fontSize: 11, cursor: "pointer", background: c.active ? "rgba(34,197,94,.15)" : "rgba(255,45,77,.15)", color: c.active ? "var(--success-500)" : "var(--signal-400)" }}>
+                    {c.active ? "activo" : "inactivo"}
+                  </button>
+                </td>
+                <td style={{ padding: "10px 12px", whiteSpace: "nowrap" }}>
+                  <button onClick={() => startEdit(c)} style={{ background: "none", border: "none", color: "var(--accent-400)", marginRight: 8, padding: 4 }}><Icon.Edit style={{ width: 14, height: 14 }} /></button>
+                  <button onClick={() => remove(c.id)} style={{ background: "none", border: "none", color: "var(--signal-400)", padding: 4 }}><Icon.Trash style={{ width: 14, height: 14 }} /></button>
+                </td>
+              </tr>
+            ))}
+            {(db.coupons || []).length === 0 && <tr><td colSpan="4" style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>Sin cupones todavía.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   ADMIN — MODERACIÓN DE RESEÑAS
+   ============================================================ */
+function AdminReviews({ db, setDb }) {
+  function setApproved(id, approved) {
+    setDb((prev) => { const next = { ...prev, reviews: (prev.reviews || []).map((r) => r.id === id ? { ...r, approved } : r) }; saveDB(next); return next; });
+  }
+  function remove(id) {
+    if (!confirm("¿Eliminar esta reseña?")) return;
+    setDb((prev) => { const next = { ...prev, reviews: (prev.reviews || []).filter((r) => r.id !== id) }; saveDB(next); return next; });
+  }
+  const reviews = db.reviews || [];
+  return (
+    <div>
+      <h1 style={{ margin: "0 0 20px", fontSize: 22, fontWeight: 700 }}>Reseñas</h1>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {reviews.map((r) => {
+          const product = db.products.find((p) => p.id === r.product_id);
+          return (
+            <div key={r.id} style={{ borderRadius: 12, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <div>
+                  <span style={{ fontWeight: 600, fontSize: 13 }}>{r.name}</span>
+                  <span style={{ color: "#6b7280", fontSize: 12 }}> · {product ? product.title : "producto eliminado"}</span>
+                </div>
+                <StarRating value={r.rating} size={13} />
+              </div>
+              <p style={{ margin: "0 0 10px", fontSize: 13, color: "#d1d5db" }}>{r.comment}</p>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span style={{ borderRadius: 999, padding: "3px 10px", fontSize: 11, background: r.approved ? "rgba(34,197,94,.15)" : "rgba(255,45,77,.15)", color: r.approved ? "var(--success-500)" : "var(--signal-400)" }}>
+                  {r.approved ? "aprobada / visible" : "pendiente de revisión"}
+                </span>
+                {!r.approved && <button onClick={() => setApproved(r.id, true)} style={{ borderRadius: 999, border: "1px solid var(--success-500)", background: "transparent", color: "var(--success-500)", padding: "4px 10px", fontSize: 11 }}>Aprobar</button>}
+                {r.approved && <button onClick={() => setApproved(r.id, false)} style={{ borderRadius: 999, border: "1px solid var(--base-700)", background: "transparent", color: "#9ca3af", padding: "4px 10px", fontSize: 11 }}>Ocultar</button>}
+                <button onClick={() => remove(r.id)} style={{ background: "none", border: "none", color: "var(--signal-400)", padding: 4, marginLeft: "auto" }}><Icon.Trash style={{ width: 14, height: 14 }} /></button>
+              </div>
+            </div>
+          );
+        })}
+        {reviews.length === 0 && <p style={{ color: "#6b7280", fontSize: 13 }}>No hay reseñas todavía.</p>}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   ADMIN — FAQ
+   ============================================================ */
+const emptyFaqForm = { question: "", answer: "" };
+
+function AdminFAQ({ db, setDb }) {
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState(emptyFaqForm);
+  const inputStyle = { width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 13, color: "#fff", colorScheme: "dark" };
+  const labelStyle = { display: "block", marginBottom: 4, fontSize: 12, color: "#9ca3af" };
+
+  function startNew() { setForm(emptyFaqForm); setEditing("new"); }
+  function startEdit(f) { setForm({ question: f.question, answer: f.answer }); setEditing(f.id); }
+  function cancel() { setEditing(null); setForm(emptyFaqForm); }
+
+  function save() {
+    if (!form.question.trim() || !form.answer.trim()) return;
+    setDb((prev) => {
+      let faqs = prev.faqs || [];
+      if (editing === "new") {
+        faqs = [...faqs, { id: uid(), question: form.question.trim(), answer: form.answer.trim(), order: faqs.length + 1 }];
+      } else {
+        faqs = faqs.map((f) => f.id === editing ? { ...f, question: form.question.trim(), answer: form.answer.trim() } : f);
+      }
+      const next = { ...prev, faqs };
+      saveDB(next);
+      return next;
+    });
+    cancel();
+  }
+  function remove(id) {
+    if (!confirm("¿Eliminar esta pregunta?")) return;
+    setDb((prev) => { const next = { ...prev, faqs: (prev.faqs || []).filter((f) => f.id !== id) }; saveDB(next); return next; });
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+        <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>Preguntas frecuentes</h1>
+        <button onClick={startNew} style={{ display: "flex", alignItems: "center", gap: 6, borderRadius: 999, border: "none", background: "var(--accent-500)", color: "#05060a", padding: "8px 14px", fontSize: 13, fontWeight: 600 }}>
+          <Icon.Plus style={{ width: 14, height: 14 }} /> Nueva pregunta
+        </button>
+      </div>
+
+      {editing && (
+        <div className="fade-in" style={{ marginBottom: 24, borderRadius: 16, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 20, maxWidth: 560 }}>
+          <h2 style={{ marginTop: 0, fontSize: 15, fontWeight: 600 }}>{editing === "new" ? "Nueva pregunta" : "Editar pregunta"}</h2>
+          <div style={{ marginBottom: 12 }}><label style={labelStyle}>Pregunta</label><input style={inputStyle} value={form.question} onChange={(e) => setForm({ ...form, question: e.target.value })} /></div>
+          <div style={{ marginBottom: 12 }}><label style={labelStyle}>Respuesta</label><textarea rows={3} style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} value={form.answer} onChange={(e) => setForm({ ...form, answer: e.target.value })} /></div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={save} disabled={!form.question.trim() || !form.answer.trim()} style={{ borderRadius: 999, border: "none", background: "var(--success-500)", color: "#fff", padding: "8px 16px", fontSize: 13, fontWeight: 600, opacity: (!form.question.trim() || !form.answer.trim()) ? 0.5 : 1 }}>Guardar</button>
+            <button onClick={cancel} style={{ borderRadius: 999, border: "1px solid var(--base-700)", background: "transparent", color: "#9ca3af", padding: "8px 16px", fontSize: 13 }}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {(db.faqs || []).map((f) => (
+          <div key={f.id} style={{ borderRadius: 12, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 14 }}>
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
+              <div>
+                <p style={{ margin: "0 0 4px", fontSize: 13, fontWeight: 600 }}>{f.question}</p>
+                <p style={{ margin: 0, fontSize: 12, color: "#9ca3af" }}>{f.answer}</p>
+              </div>
+              <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                <button onClick={() => startEdit(f)} style={{ background: "none", border: "none", color: "var(--accent-400)", padding: 4 }}><Icon.Edit style={{ width: 14, height: 14 }} /></button>
+                <button onClick={() => remove(f.id)} style={{ background: "none", border: "none", color: "var(--signal-400)", padding: 4 }}><Icon.Trash style={{ width: 14, height: 14 }} /></button>
+              </div>
+            </div>
+          </div>
+        ))}
+        {(db.faqs || []).length === 0 && <p style={{ color: "#6b7280", fontSize: 13 }}>Sin preguntas todavía.</p>}
+      </div>
+    </div>
+  );
+}
+
+function SheetSyncButton({ label, onSync }) {
+  const [status, setStatus] = useState(null); // { ok, message/count }
+  const [loading, setLoading] = useState(false);
+
+  async function handleSync() {
+    setLoading(true);
+    setStatus(null);
+    const result = await onSync();
+    setLoading(false);
+    setStatus(result);
+  }
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <button type="button" onClick={handleSync} disabled={loading}
+        style={{ display: "flex", alignItems: "center", gap: 8, borderRadius: 999, border: "1px solid var(--base-700)", background: "transparent", color: "var(--accent-400)", padding: "8px 16px", fontSize: 13, opacity: loading ? 0.6 : 1 }}>
+        {loading && <Icon.Loader className="spin" style={{ width: 14, height: 14 }} />}
+        {label}
+      </button>
+      {status && (
+        <p style={{ margin: "6px 0 0", fontSize: 12, color: status.ok ? "var(--success-500)" : "var(--signal-400)" }}>
+          {status.ok ? `✓ ${status.count} fila(s) importada(s) desde el Sheet.` : `✕ ${status.message}`}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function AdminSettings({ db, setDb }) {
-  const [form, setForm] = useState(db.settings);
+  const [form, setForm] = useState({ announcement: { text: "", bg_color: "#0090e0", link: "", active: false }, ...db.settings });
   const [newPassword, setNewPassword] = useState("");
   const [saved, setSaved] = useState(false);
+  const [uploadingQr, setUploadingQr] = useState(null);
 
   function save() {
     setDb((prev) => {
@@ -1076,7 +2553,16 @@ function AdminSettings({ db, setDb }) {
     setTimeout(() => setSaved(false), 2000);
   }
 
-  const inputStyle = { width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 13, color: "#fff" };
+  function handleQrUpload(field, e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setUploadingQr(field);
+    uploadImageSmart(file, "qr-codes")
+      .then((url) => { setForm((f) => ({ ...f, [field]: url })); setUploadingQr(null); })
+      .catch(() => setUploadingQr(null));
+  }
+
+  const inputStyle = { width: "100%", borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: "8px 12px", fontSize: 13, color: "#fff", colorScheme: "dark" };
   const labelStyle = { display: "block", marginBottom: 4, fontSize: 12, color: "#9ca3af" };
 
   return (
@@ -1090,9 +2576,52 @@ function AdminSettings({ db, setDb }) {
       <div style={{ borderRadius: 16, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: 20, display: "flex", flexDirection: "column", gap: 12 }}>
         <div><label style={labelStyle}>Número de WhatsApp (con código de país, sin +)</label><input style={inputStyle} value={form.whatsapp_number} onChange={(e) => setForm({ ...form, whatsapp_number: e.target.value })} /></div>
         <div><label style={labelStyle}>Número Yape</label><input style={inputStyle} value={form.yape_number || ""} onChange={(e) => setForm({ ...form, yape_number: e.target.value })} /></div>
-        <div><label style={labelStyle}>Número Plin</label><input style={inputStyle} value={form.plin_number || ""} onChange={(e) => setForm({ ...form, plin_number: e.target.value })} /></div>
+        <div>
+          <label style={labelStyle}>Código QR Yape</label>
+          <input type="file" accept="image/*" onChange={(e) => handleQrUpload("yape_qr_url", e)} style={{ ...inputStyle, padding: "6px 8px" }} />
+          {uploadingQr === "yape_qr_url" && <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--accent-400)" }}>Subiendo...</p>}
+          {form.yape_qr_url && <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}><img src={form.yape_qr_url} alt="QR Yape" style={{ width: 60, height: 60, objectFit: "contain", background: "#fff", borderRadius: 6 }} /><button type="button" onClick={() => setForm((f) => ({ ...f, yape_qr_url: null }))} style={{ background: "none", border: "1px solid var(--base-700)", color: "#9ca3af", borderRadius: 999, padding: "2px 10px", fontSize: 11 }}>Quitar</button></div>}
+        </div>
         <div><label style={labelStyle}>Cuenta BCP</label><input style={inputStyle} value={form.bank_bcp_account || ""} onChange={(e) => setForm({ ...form, bank_bcp_account: e.target.value })} /></div>
         <div><label style={labelStyle}>Cuenta Interbank</label><input style={inputStyle} value={form.bank_interbank_account || ""} onChange={(e) => setForm({ ...form, bank_interbank_account: e.target.value })} /></div>
+        <div>
+          <label style={labelStyle}>Código QR de banco (transferencia)</label>
+          <input type="file" accept="image/*" onChange={(e) => handleQrUpload("bank_qr_url", e)} style={{ ...inputStyle, padding: "6px 8px" }} />
+          {uploadingQr === "bank_qr_url" && <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--accent-400)" }}>Subiendo...</p>}
+          {form.bank_qr_url && <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}><img src={form.bank_qr_url} alt="QR banco" style={{ width: 60, height: 60, objectFit: "contain", background: "#fff", borderRadius: 6 }} /><button type="button" onClick={() => setForm((f) => ({ ...f, bank_qr_url: null }))} style={{ background: "none", border: "1px solid var(--base-700)", color: "#9ca3af", borderRadius: 999, padding: "2px 10px", fontSize: 11 }}>Quitar</button></div>}
+        </div>
+
+        <hr style={{ border: "none", borderTop: "1px solid var(--base-700)", margin: "8px 0" }} />
+        <p style={{ margin: "0 0 4px", fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><Icon.Megaphone style={{ width: 14, height: 14 }} /> Banner promocional</p>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#d1d5db" }}>
+          <input type="checkbox" checked={form.announcement.active} onChange={(e) => setForm({ ...form, announcement: { ...form.announcement, active: e.target.checked } })} /> Activar banner en la tienda
+        </label>
+        <div><label style={labelStyle}>Texto del banner</label><input style={inputStyle} value={form.announcement.text} onChange={(e) => setForm({ ...form, announcement: { ...form.announcement, text: e.target.value } })} placeholder="Ej: 🔥 20% de descuento hoy con el cupón VERANO20" /></div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 12 }}>
+          <div><label style={labelStyle}>Color de fondo</label><input type="color" value={form.announcement.bg_color} onChange={(e) => setForm({ ...form, announcement: { ...form.announcement, bg_color: e.target.value } })} style={{ width: "100%", height: 36, borderRadius: 8, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: 2 }} /></div>
+          <div><label style={labelStyle}>Enlace (opcional)</label><input style={inputStyle} value={form.announcement.link} onChange={(e) => setForm({ ...form, announcement: { ...form.announcement, link: e.target.value } })} placeholder="https://wa.me/51999999999" /></div>
+        </div>
+
+        <hr style={{ border: "none", borderTop: "1px solid var(--base-700)", margin: "8px 0" }} />
+        <p style={{ margin: "0 0 4px", fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}><Icon.Sheet style={{ width: 14, height: 14 }} /> Sincronización con Google Sheets</p>
+        <p style={{ margin: "0 0 4px", fontSize: 11, color: "#6b7280" }}>Pega aquí las dos URLs que obtienes siguiendo las instrucciones dentro del código (busca "SINCRONIZACIÓN CON GOOGLE SHEETS"). Puedes dejarlas vacías si no quieres usar esto.</p>
+        <div>
+          <label style={labelStyle}>URL del CSV del catálogo (Google Sheets)</label>
+          <input style={inputStyle} value={form.sheet_csv_url || ""} onChange={(e) => setForm({ ...form, sheet_csv_url: e.target.value })} placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?output=csv" />
+        </div>
+        <div>
+          <label style={labelStyle}>URL del CSV de cupones (Google Sheets)</label>
+          <input style={inputStyle} value={form.sheet_coupons_csv_url || ""} onChange={(e) => setForm({ ...form, sheet_coupons_csv_url: e.target.value })} placeholder="https://docs.google.com/spreadsheets/d/e/.../pub?output=csv" />
+        </div>
+        <div>
+          <label style={labelStyle}>URL de webhook de pedidos y reseñas (Google Apps Script)</label>
+          <input style={inputStyle} value={form.sheet_orders_webhook_url || ""} onChange={(e) => setForm({ ...form, sheet_orders_webhook_url: e.target.value })} placeholder="https://script.google.com/macros/s/.../exec" />
+        </div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <SheetSyncButton label="Sincronizar catálogo ahora" onSync={() => syncCatalogFromSheet(form.sheet_csv_url, setDb)} />
+          <SheetSyncButton label="Sincronizar cupones ahora" onSync={() => syncCouponsFromSheet(form.sheet_coupons_csv_url, setDb)} />
+        </div>
+
         <hr style={{ border: "none", borderTop: "1px solid var(--base-700)", margin: "8px 0" }} />
         <div><label style={labelStyle}>Nueva contraseña de admin (opcional)</label><input type="password" style={inputStyle} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder="Dejar en blanco para no cambiar" /></div>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
@@ -1118,7 +2647,11 @@ function AdminShell({ db, setDb }) {
       <div style={{ flex: 1, padding: 32, overflowX: "auto" }}>
         {section === "dashboard" && <AdminDashboard db={db} />}
         {section === "products" && <AdminProducts db={db} setDb={setDb} />}
+        {section === "categories" && <AdminCategories db={db} setDb={setDb} />}
         {section === "orders" && <AdminOrders db={db} setDb={setDb} />}
+        {section === "coupons" && <AdminCoupons db={db} setDb={setDb} />}
+        {section === "reviews" && <AdminReviews db={db} setDb={setDb} />}
+        {section === "faq" && <AdminFAQ db={db} setDb={setDb} />}
         {section === "settings" && <AdminSettings db={db} setDb={setDb} />}
       </div>
     </div>
@@ -1128,6 +2661,47 @@ function AdminShell({ db, setDb }) {
 /* ============================================================
    APP ROOT — router simple con hash (#/  y  #/admin)
    ============================================================ */
+/* Red de seguridad: si CUALQUIER parte de la app truena al renderizar,
+   en vez de dejar la pantalla en negro (React desmonta todo y no queda
+   nada visible salvo el fondo oscuro del body), mostramos el error real
+   y un botón para recargar. Esto nunca debería "ocultar" el bug, solo
+   evita el silencio total y nos dice exactamente qué pasó. */
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error("Error capturado por ErrorBoundary:", error, info);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center" }}>
+          <div style={{ maxWidth: 480 }}>
+            <div style={{ fontSize: 40, marginBottom: 12 }}>⚠️</div>
+            <h1 style={{ fontSize: 18, margin: "0 0 8px" }}>Ocurrió un error inesperado</h1>
+            <p style={{ color: "#9ca3af", fontSize: 13, marginBottom: 16 }}>
+              La app encontró un problema y se detuvo para no mostrar datos corruptos. Detalle técnico:
+            </p>
+            <pre style={{ textAlign: "left", background: "var(--base-900)", border: "1px solid var(--base-700)", borderRadius: 8, padding: 12, fontSize: 11, overflowX: "auto", color: "var(--signal-400)" }}>
+              {String(this.state.error && (this.state.error.stack || this.state.error.message || this.state.error))}
+            </pre>
+            <button onClick={() => window.location.reload()}
+              style={{ marginTop: 16, background: "var(--accent-500)", color: "#000", border: "none", borderRadius: 8, padding: "10px 20px", fontWeight: 700, cursor: "pointer" }}>
+              Recargar página
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function App() {
   const [db, setDb] = useState(loadDB);
   const [route, setRoute] = useState(window.location.hash || "#/");
@@ -1146,7 +2720,7 @@ function App() {
     return unsubscribe;
   }, []);
 
-  if (route.startsWith("#/admin")) return <AdminShell db={db} setDb={setDb} />;
+  if (route.startsWith(ADMIN_ROUTE)) return <AdminShell db={db} setDb={setDb} />;
   return <StorePage db={db} setDb={setDb} />;
 }
 
@@ -1156,8 +2730,9 @@ function applyResponsiveStyles() {
   styleTag.textContent = `
     @media (min-width: 768px) {
       .desktop-search { display: block !important; }
-      .desktop-wa { display: flex !important; }
+      .desktop-wa-wrap { display: flex !important; }
       .mobile-panel { display: none !important; }
+      .mobile-only-cart { display: none !important; }
     }
     @media (min-width: 1024px) {
       .desktop-nav { display: flex !important; }
@@ -1183,7 +2758,7 @@ function applyResponsiveStyles() {
 applyResponsiveStyles();
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(<App />);
+root.render(<ErrorBoundary><App /></ErrorBoundary>);
 </script>
 </body>
 </html>
