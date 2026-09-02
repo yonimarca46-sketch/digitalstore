@@ -94,7 +94,47 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-" + Math.random
    El admin decide cuáles de estas (o una duración libre) ofrecer por producto;
    no todos los productos tienen que tener todas las opciones. */
 const DURATION_PRESETS = ["1 mes", "2 meses", "3 meses", "6 meses", "12 meses / 1 año"];
-const plan = (duration_label, price) => ({ id: uid(), duration_label, price });
+/* "cost" = costo de adquisición del plan (lo que TÚ pagas por darlo de alta),
+   para poder calcular ganancia real (precio de venta - costo) en el dashboard. */
+const plan = (duration_label, price, cost = 0) => ({ id: uid(), duration_label, price, cost });
+
+/* Convierte una etiqueta de duración libre (ej. "3 meses", "12 meses / 1 año",
+   "15 días") a una cantidad aproximada de días, para poder calcular la fecha
+   de vencimiento de una compra. Si no logra reconocer la unidad, devuelve
+   null (duración desconocida -> no se calcula vencimiento). */
+function parseDurationToDays(label) {
+  if (!label) return null;
+  const s = String(label).toLowerCase();
+  const numMatch = s.match(/(\d+(?:[.,]\d+)?)/);
+  const n = numMatch ? parseFloat(numMatch[1].replace(",", ".")) : 1;
+  if (!isFinite(n) || n <= 0) return null;
+  if (/año|anio|year/.test(s)) return Math.round(n * 365);
+  if (/mes/.test(s)) return Math.round(n * 30);
+  if (/semana|week/.test(s)) return Math.round(n * 7);
+  if (/d[ií]a|day/.test(s)) return Math.round(n);
+  return null;
+}
+
+/* Fecha de vencimiento de una compra = fecha del pedido + duración del plan. */
+function computeExpiresAt(createdAtISO, durationLabel) {
+  const days = parseDurationToDays(durationLabel);
+  if (days == null) return null;
+  const d = new Date(createdAtISO);
+  d.setDate(d.getDate() + days);
+  return d.toISOString();
+}
+
+/* Texto + color legible para mostrar cuánto falta (o hace) para el
+   vencimiento de una suscripción/compra en las tablas del admin. */
+function formatExpiry(expiresAt) {
+  if (!expiresAt) return { text: "—", color: "#6b7280" };
+  const diffMs = new Date(expiresAt).getTime() - Date.now();
+  const diffDays = Math.ceil(diffMs / 86400000);
+  const dateStr = new Date(expiresAt).toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" });
+  if (diffDays < 0) return { text: `Venció hace ${Math.abs(diffDays)}d (${dateStr})`, color: "var(--signal-400)" };
+  if (diffDays <= 5) return { text: `Vence en ${diffDays}d (${dateStr})`, color: "#f59e0b" };
+  return { text: dateStr, color: "#9ca3af" };
+}
 
 /* Estas categorías son solo el "arranque" de una tienda nueva (primera vez que
    se abre, sin datos aún en la nube). Desde el Panel Admin → pestaña
@@ -123,8 +163,8 @@ const SEED_PRODUCTS = [
     stock: 25, is_active: true,
     features: ["Acceso ilimitado a rutinas", "Plan nutricional incluido", "Soporte por WhatsApp"],
     plans: [
-      plan("1 mes", 39.90),
-      plan("3 meses", 99.90),
+      plan("1 mes", 39.90, 12),
+      plan("3 meses", 99.90, 30),
     ],
   },
   {
@@ -135,7 +175,7 @@ const SEED_PRODUCTS = [
     stock: 100, is_active: true,
     features: ["+40 horas de video", "Certificado digital", "Acceso de por vida (12 meses renovable)"],
     plans: [
-      plan("12 meses / 1 año", 59.90),
+      plan("12 meses / 1 año", 59.90, 15),
     ],
   },
   {
@@ -146,7 +186,7 @@ const SEED_PRODUCTS = [
     stock: 8, is_active: true,
     features: ["1 activación por licencia", "Actualizaciones incluidas", "Soporte técnico"],
     plans: [
-      plan("12 meses / 1 año", 149.90),
+      plan("12 meses / 1 año", 149.90, 45),
     ],
   },
   {
@@ -157,8 +197,8 @@ const SEED_PRODUCTS = [
     stock: 0, is_active: true,
     features: ["200+ plantillas editables", "Formato Canva Pro", "Actualizaciones mensuales"],
     plans: [
-      plan("1 mes", 19.90),
-      plan("2 meses", 34.90),
+      plan("1 mes", 19.90, 5),
+      plan("2 meses", 34.90, 10),
     ],
   },
 ];
@@ -347,9 +387,19 @@ function migrateDB(db) {
   const productsArr = Array.isArray(db.products) ? db.products : [];
   return {
     ...db,
-    products: productsArr.map(migrateProduct).map((p) => ({ license_keys: [], ...p })),
+    products: productsArr.map(migrateProduct).map((p) => ({
+      license_keys: [], ...p,
+      // Rellena "cost" (costo de adquisición) = 0 en planes guardados antes de
+      // que existiera este campo, así nunca se rompe un producto viejo.
+      plans: (p.plans || []).map((pl) => ({ cost: 0, ...pl })),
+    })),
     categories: (db.categories || []).map((c) => ({ icon: "", ...c })),
-    orders: db.orders || [],
+    // Pedidos guardados antes de tener costo/vencimiento: si falta expires_at
+    // pero sí hay duración y fecha de creación, se calcula al vuelo.
+    orders: (db.orders || []).map((o) => ({
+      cost_at_order: 0, ...o,
+      expires_at: o.expires_at !== undefined ? o.expires_at : computeExpiresAt(o.created_at, o.plan_duration_label),
+    })),
     coupons: db.coupons || [],
     reviews: db.reviews || [],
     faqs: db.faqs || [],
@@ -389,9 +439,11 @@ function saveDB(db) {
       1. En tu Google Sheet, crea una pestaña llamada por ejemplo
          "Productos" con estas columnas en la primera fila:
            title | category | description | image_url | stock | active
-           | features | plan1_label | plan1_price | plan2_label | plan2_price
+           | features | plan1_label | plan1_price | plan1_cost | plan2_label | plan2_price | plan2_cost
          (features: varias características separadas por " | ";
-          "active": SI/NO — vacío se toma como activo)
+          "active": SI/NO — vacío se toma como activo;
+          "planN_cost" es opcional: tu costo de adquisición de ese plan,
+          para poder calcular ganancia real en el Dashboard)
       2. Archivo → Compartir → Publicar en la Web.
       3. Elige la pestaña "Productos" y el formato "Valores separados
          por comas (.csv)", luego "Publicar".
@@ -434,12 +486,13 @@ function saveDB(db) {
              let sheet = ss.getSheetByName("Pedidos");
              if (!sheet) sheet = ss.insertSheet("Pedidos");
              if (sheet.getLastRow() === 0) {
-               sheet.appendRow(["Fecha","Producto","Plan","Cantidad","Precio","Cupón","Descuento",
+               sheet.appendRow(["Fecha","Producto","Plan","Cantidad","Precio","Costo","Vence","Cupón","Descuento",
                  "Cód. operación","Cliente","WhatsApp","Método de pago","Comprobante"]);
              }
              sheet.appendRow([
                data.created_at || "", data.product_title || "", data.plan_duration_label || "",
-               data.qty || "", data.price_at_order || "", data.coupon_code || "", data.discount_amount || "",
+               data.qty || "", data.price_at_order || "", data.cost_at_order || "", data.expires_at || "",
+               data.coupon_code || "", data.discount_amount || "",
                data.operation_code || "", data.customer_name || "", data.customer_phone || "",
                data.payment_method || "", data.payment_proof_url || "",
              ]);
@@ -520,11 +573,13 @@ function rowsToProducts(rows, existingCategories) {
     for (let n = 1; n <= 4; n++) {
       const label = get(r, `plan${n}_label`, `plan${n} label`);
       const priceRaw = get(r, `plan${n}_price`, `plan${n} price`);
-      if (label && priceRaw) plans.push(plan(label, parseFloat(priceRaw.replace(",", ".")) || 0));
+      const costRaw = get(r, `plan${n}_cost`, `plan${n} cost`, `plan${n}_costo`);
+      if (label && priceRaw) plans.push(plan(label, parseFloat(priceRaw.replace(",", ".")) || 0, parseFloat((costRaw || "0").replace(",", ".")) || 0));
     }
     if (plans.length === 0) {
       const priceRaw = get(r, "price", "precio");
-      plans.push(plan(get(r, "duration", "duracion", "duración") || "1 mes", parseFloat((priceRaw || "0").replace(",", ".")) || 0));
+      const costRaw = get(r, "cost", "costo");
+      plans.push(plan(get(r, "duration", "duracion", "duración") || "1 mes", parseFloat((priceRaw || "0").replace(",", ".")) || 0, parseFloat((costRaw || "0").replace(",", ".")) || 0));
     }
 
     const featuresRaw = get(r, "features", "caracteristicas", "características");
@@ -685,7 +740,69 @@ const Icon = {
   HelpCircle: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>,
   Paperclip: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>,
   Sheet: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>,
+  ZoomIn: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>,
 };
+
+/* ============================================================
+   ZOOMABLE IMAGE (fit-to-container + tap-to-zoom lightbox)
+   ============================================================ */
+function ZoomableImage({ src, alt, imgStyle, fit = "contain", showHint = true, hintSize = 14, clickToZoom = true }) {
+  const [open, setOpen] = useState(false);
+
+  // Bloquea el scroll del fondo mientras el visor de zoom está abierto,
+  // para que en celular no se sienta "trabado" al arrastrar el dedo.
+  useEffect(() => {
+    if (!open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, [open]);
+
+  if (!src) return null;
+  return (
+    <>
+      <img
+        src={src}
+        alt={alt}
+        style={{ width: "100%", height: "100%", objectFit: fit, cursor: clickToZoom ? "zoom-in" : "inherit", ...imgStyle }}
+        onClick={clickToZoom ? (e) => { e.stopPropagation(); setOpen(true); } : undefined}
+        onError={(e) => { e.target.style.display = "none"; }}
+      />
+      {showHint && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); setOpen(true); }}
+          style={{ position: "absolute", right: 8, bottom: 8, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.55)", border: "none", color: "#fff", padding: 6, borderRadius: 999, cursor: "zoom-in", zIndex: 2 }}
+          aria-label="Ampliar imagen"
+        >
+          <Icon.ZoomIn style={{ width: hintSize, height: hintSize }} />
+        </button>
+      )}
+      {open && ReactDOM.createPortal(
+        <div
+          onClick={(e) => { e.stopPropagation(); setOpen(false); }}
+          className="fade-in"
+          style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,.92)", display: "flex", alignItems: "center", justifyContent: "center", padding: "24px 16px" }}
+        >
+          <button
+            onClick={(e) => { e.stopPropagation(); setOpen(false); }}
+            style={{ position: "absolute", top: 16, right: 16, background: "rgba(255,255,255,.12)", border: "none", color: "#fff", padding: 8, borderRadius: 999, display: "flex" }}
+            aria-label="Cerrar"
+          >
+            <Icon.X style={{ width: 22, height: 22 }} />
+          </button>
+          <img
+            src={src}
+            alt={alt}
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: "100%", maxHeight: "100%", width: "auto", height: "auto", objectFit: "contain", borderRadius: 10 }}
+          />
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
 
 /* ============================================================
    DROPDOWN PROPIO (reemplaza al <select> nativo)
@@ -888,9 +1005,9 @@ function ProductCard({ product, onSelect, onQuickAdd }) {
 
   return (
     <div className="card-hover" style={{ position: "relative", overflow: "hidden", borderRadius: 20, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", boxShadow: "0 10px 25px rgba(0,0,0,.3)" }}>
-      <div onClick={() => onSelect(product)} style={{ position: "relative", height: 160, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", background: "var(--base-700)", cursor: "pointer" }}>
+      <div onClick={() => onSelect(product)} style={{ position: "relative", height: "min(45vw, 200px)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", background: "linear-gradient(160deg, var(--base-700), var(--base-800))", cursor: "pointer" }}>
         {product.image_url ? (
-          <img src={product.image_url} alt={product.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={(e) => { e.target.style.display = "none"; }} />
+          <ZoomableImage src={product.image_url} alt={product.title} imgStyle={{ padding: 8 }} hintSize={13} clickToZoom={false} />
         ) : (
           <Icon.ImageOff style={{ width: 32, height: 32, color: "var(--base-600)" }} />
         )}
@@ -990,6 +1107,49 @@ function CatalogGrid({ products, onSelect, onQuickAdd }) {
       </div>
 
       {filtered.length === 0 && <div style={{ padding: "64px 0", textAlign: "center", color: "#6b7280" }}>No se encontraron productos con estos filtros.</div>}
+    </div>
+  );
+}
+
+/* ============================================================
+   DESCRIPCIÓN ENRIQUECIDA
+   ------------------------------------------------------------
+   El admin puede escribir la descripción como texto corrido, o
+   poner cada punto en una línea nueva empezando con "-", "•" o "*"
+   para que se muestre como una lista con viñetas reales (en vez de
+   quedar todo pegado en un solo párrafo largo, que es lo que pasaba
+   antes porque los saltos de línea se ignoraban al renderizar).
+   ============================================================ */
+function RichDescription({ text }) {
+  if (!text || !text.trim()) return null;
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length === 0) return null;
+  const isBulletLine = (l) => /^[-•*]\s+/.test(l);
+  const stripBullet = (l) => l.replace(/^[-•*]\s+/, "");
+
+  // Agrupa líneas de texto normal en párrafos, y cualquier línea que empiece
+  // con -, • o * se muestra como ítem de lista suelto, respetando el orden.
+  const blocks = [];
+  let paragraph = [];
+  const flushParagraph = () => {
+    if (paragraph.length) { blocks.push({ type: "p", text: paragraph.join(" ") }); paragraph = []; }
+  };
+  lines.forEach((l) => {
+    if (isBulletLine(l)) { flushParagraph(); blocks.push({ type: "li", text: stripBullet(l) }); }
+    else paragraph.push(l);
+  });
+  flushParagraph();
+
+  return (
+    <div style={{ margin: "0 0 16px" }}>
+      {blocks.map((b, i) => b.type === "p" ? (
+        <p key={i} style={{ margin: "0 0 10px", fontSize: 14, color: "#d1d5db", lineHeight: 1.6 }}>{b.text}</p>
+      ) : (
+        <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 14, color: "#d1d5db", lineHeight: 1.5, marginBottom: 6 }}>
+          <span style={{ color: "var(--accent-400)", marginTop: 2, flexShrink: 0 }}>●</span>
+          <span>{b.text}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1096,9 +1256,9 @@ function ProductDetailModal({ product, allProducts, reviews, onAddReview, onClos
   return (
     <div className="fade-in" onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,.7)", backdropFilter: "blur(4px)", padding: 16 }}>
       <div className="slide-up" onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 640, borderRadius: 20, border: "1px solid var(--base-700)", background: "var(--base-900)", maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ position: "relative", height: 260, background: "var(--base-700)", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", borderRadius: "20px 20px 0 0" }}>
+        <div style={{ position: "relative", height: "min(70vw, 420px)", minHeight: 220, background: "linear-gradient(160deg, var(--base-700), var(--base-800))", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", borderRadius: "20px 20px 0 0" }}>
           {product.image_url ? (
-            <img src={product.image_url} alt={product.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={(e) => { e.target.style.display = "none"; }} />
+            <ZoomableImage src={product.image_url} alt={product.title} imgStyle={{ padding: 12 }} />
           ) : (
             <Icon.ImageOff style={{ width: 40, height: 40, color: "var(--base-600)" }} />
           )}
@@ -1110,7 +1270,7 @@ function ProductDetailModal({ product, allProducts, reviews, onAddReview, onClos
 
         <div style={{ padding: 24 }}>
           <h2 style={{ margin: "0 0 8px", fontSize: 20, fontWeight: 700 }}>{product.title}</h2>
-          {product.description && <p style={{ margin: "0 0 16px", fontSize: 14, color: "#d1d5db", lineHeight: 1.6 }}>{product.description}</p>}
+          <RichDescription text={product.description} />
 
           {product.features && product.features.length > 0 && (
             <ul style={{ listStyle: "none", margin: "0 0 20px", padding: 0, display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1272,10 +1432,16 @@ function CartModal({ cart, products, settings, coupons, onClose, onUpdateQty, on
     setLoading(true);
 
     const proceed = (proofUrl) => {
+      const nowISO = new Date().toISOString();
       const orders = lines.map((l) => ({
         id: uid(), product_id: l.product.id, customer_name: name.trim(), customer_phone: phone.trim(),
-        payment_method: payment, plan_duration_label: l.plan.duration_label, price_at_order: l.plan.price, qty: l.qty,
-        status: "pendiente", notes: null, created_at: new Date().toISOString(),
+        payment_method: payment, plan_duration_label: l.plan.duration_label, price_at_order: l.plan.price,
+        cost_at_order: l.plan.cost || 0, qty: l.qty,
+        status: "pendiente", notes: null, created_at: nowISO,
+        // Fecha estimada de vencimiento de esta compra/suscripción, calculada
+        // a partir de la duración del plan (null si la duración no se pudo
+        // interpretar, ej. un texto libre poco común).
+        expires_at: computeExpiresAt(nowISO, l.plan.duration_label),
         coupon_code: appliedCoupon ? appliedCoupon.code : null,
         discount_amount: appliedCoupon && subtotal > 0 ? discount * (l.plan.price * l.qty / subtotal) : 0,
         operation_code: opCode.trim(),
@@ -1669,7 +1835,7 @@ function AdminLogin({ db, onLoggedIn }) {
 /* ============================================================
    ADMIN — SIDEBAR + SHELL
    ============================================================ */
-function AdminSidebar({ section, onNavigate, onLogout }) {
+function AdminSidebar({ section, onNavigate, onLogout, mobileOpen, onCloseMobile }) {
   const items = [
     { key: "dashboard", label: "Dashboard", icon: Icon.Grid },
     { key: "products", label: "Productos", icon: Icon.Box },
@@ -1680,29 +1846,40 @@ function AdminSidebar({ section, onNavigate, onLogout }) {
     { key: "faq", label: "FAQ", icon: Icon.HelpCircle },
     { key: "settings", label: "Configuración", icon: Icon.Settings },
   ];
+  // En pantallas chicas el sidebar se comporta como un cajón (drawer) que se
+  // desliza desde la izquierda sobre un overlay oscuro, en vez de aplastar el
+  // contenido como pasaba antes (no había ninguna versión mobile del panel).
   return (
-    <aside style={{ width: 220, flexShrink: 0, borderRight: "1px solid var(--base-700)", background: "var(--base-900)", minHeight: "100vh", padding: 16, display: "flex", flexDirection: "column" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 24, padding: "0 4px" }}>
-        <div style={{ width: 32, height: 32, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14, background: "linear-gradient(135deg, var(--accent-500), var(--signal-500))" }}>D</div>
-        <span style={{ fontWeight: 600, fontSize: 15 }}>Admin</span>
-      </div>
-      <nav style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
-        {items.map((it) => {
-          const IconC = it.icon; const active = section === it.key;
-          return (
-            <button key={it.key} onClick={() => onNavigate(it.key)}
-              style={{ display: "flex", alignItems: "center", gap: 10, borderRadius: 10, border: "none", padding: "10px 12px", fontSize: 14, textAlign: "left",
-                background: active ? "rgba(34,184,255,.15)" : "transparent", color: active ? "var(--accent-400)" : "#9ca3af" }}>
-              <IconC style={{ width: 16, height: 16 }} />{it.label}
-            </button>
-          );
-        })}
-      </nav>
-      <button onClick={onLogout} style={{ display: "flex", alignItems: "center", gap: 10, borderRadius: 10, border: "none", padding: "10px 12px", fontSize: 14, background: "transparent", color: "var(--signal-400)" }}>
-        <Icon.LogOut style={{ width: 16, height: 16 }} /> Cerrar sesión
-      </button>
-      <div style={{ marginTop: 12 }}><a href="#/" style={{ fontSize: 12, color: "#6b7280" }}>← Ver tienda</a></div>
-    </aside>
+    <>
+      {mobileOpen && <div className="admin-sidebar-overlay" onClick={onCloseMobile} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 59 }} />}
+      <aside className={"admin-sidebar" + (mobileOpen ? " open" : "")} style={{ width: 220, flexShrink: 0, borderRight: "1px solid var(--base-700)", background: "var(--base-900)", minHeight: "100vh", padding: 16, display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24, padding: "0 4px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ width: 32, height: 32, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14, background: "linear-gradient(135deg, var(--accent-500), var(--signal-500))" }}>D</div>
+            <span style={{ fontWeight: 600, fontSize: 15 }}>Admin</span>
+          </div>
+          <button onClick={onCloseMobile} className="admin-sidebar-close" style={{ display: "none", background: "none", border: "none", color: "#9ca3af", padding: 6, borderRadius: 8 }}>
+            <Icon.X style={{ width: 18, height: 18 }} />
+          </button>
+        </div>
+        <nav style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+          {items.map((it) => {
+            const IconC = it.icon; const active = section === it.key;
+            return (
+              <button key={it.key} onClick={() => { onNavigate(it.key); onCloseMobile(); }}
+                style={{ display: "flex", alignItems: "center", gap: 10, borderRadius: 10, border: "none", padding: "10px 12px", fontSize: 14, textAlign: "left",
+                  background: active ? "rgba(34,184,255,.15)" : "transparent", color: active ? "var(--accent-400)" : "#9ca3af" }}>
+                <IconC style={{ width: 16, height: 16 }} />{it.label}
+              </button>
+            );
+          })}
+        </nav>
+        <button onClick={onLogout} style={{ display: "flex", alignItems: "center", gap: 10, borderRadius: 10, border: "none", padding: "10px 12px", fontSize: 14, background: "transparent", color: "var(--signal-400)" }}>
+          <Icon.LogOut style={{ width: 16, height: 16 }} /> Cerrar sesión
+        </button>
+        <div style={{ marginTop: 12 }}><a href="#/" style={{ fontSize: 12, color: "#6b7280" }}>← Ver tienda</a></div>
+      </aside>
+    </>
   );
 }
 
@@ -1718,18 +1895,64 @@ function StatCard({ label, value, accent }) {
 function AdminDashboard({ db }) {
   const totalOrders = db.orders.length;
   const pending = db.orders.filter((o) => o.status === "pendiente").length;
-  const paid = db.orders.filter((o) => o.status === "pagado" || o.status === "entregado").length;
-  const revenue = db.orders.filter((o) => o.status === "pagado" || o.status === "entregado").reduce((s, o) => s + o.price_at_order * (o.qty || 1), 0);
+  const activeOrders = db.orders.filter((o) => o.status === "pagado" || o.status === "entregado");
+  const paid = activeOrders.length;
+  const revenue = activeOrders.reduce((s, o) => s + o.price_at_order * (o.qty || 1) - (o.discount_amount || 0), 0);
+  const cost = activeOrders.reduce((s, o) => s + (o.cost_at_order || 0) * (o.qty || 1), 0);
+  const profit = revenue - cost;
+
+  // Suscripciones/compras activas que vencen pronto (o ya vencieron), para
+  // que el admin sepa a quién contactar para renovación.
+  const expiringItems = activeOrders
+    .filter((o) => o.expires_at)
+    .map((o) => ({ order: o, diffDays: Math.ceil((new Date(o.expires_at).getTime() - Date.now()) / 86400000) }))
+    .filter((x) => x.diffDays <= 7)
+    .sort((a, b) => a.diffDays - b.diffDays);
+  const expiredCount = expiringItems.filter((x) => x.diffDays < 0).length;
+  const dueSoonCount = expiringItems.length - expiredCount;
 
   return (
     <div>
       <h1 style={{ margin: "0 0 20px", fontSize: 22, fontWeight: 700 }}>Dashboard</h1>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 16, marginBottom: 32 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 16, marginBottom: 20 }}>
         <StatCard label="Órdenes totales" value={totalOrders} />
         <StatCard label="Pendientes" value={pending} accent="var(--accent-400)" />
         <StatCard label="Pagadas / entregadas" value={paid} accent="var(--success-500)" />
-        <StatCard label="Ingresos confirmados" value={`S/ ${revenue.toFixed(2)}`} accent="var(--signal-400)" />
+        <StatCard label="Por vencer / vencidas" value={expiringItems.length} accent="#f59e0b" />
       </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 16, marginBottom: 32 }}>
+        <StatCard label="Ingresos confirmados" value={`S/ ${revenue.toFixed(2)}`} accent="var(--signal-400)" />
+        <StatCard label="Costos" value={`S/ ${cost.toFixed(2)}`} accent="#9ca3af" />
+        <StatCard label="Ganancia neta" value={`S/ ${profit.toFixed(2)}`} accent="var(--success-500)" />
+      </div>
+
+      {expiringItems.length > 0 && (
+        <div style={{ marginBottom: 32 }}>
+          <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Vencimientos próximos</h2>
+          <p style={{ margin: "0 0 12px", fontSize: 12, color: "#9ca3af" }}>
+            {dueSoonCount > 0 && `${dueSoonCount} por vencer en los próximos 7 días`}{dueSoonCount > 0 && expiredCount > 0 ? " · " : ""}{expiredCount > 0 && `${expiredCount} ya vencidas`}
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {expiringItems.slice(0, 8).map(({ order, diffDays }) => {
+              const product = db.products.find((p) => p.id === order.product_id);
+              const info = formatExpiry(order.expires_at);
+              const waUrl = `https://wa.me/${(order.customer_phone || "").replace(/\D/g, "")}?text=${encodeURIComponent(`Hola ${order.customer_name}, te escribimos de DigitalStore Perú: tu "${product ? product.title : "producto"}" (${order.plan_duration_label || ""}) ${diffDays < 0 ? "ya venció" : "está por vencer"}. ¿Deseas renovarlo?`)}`;
+              return (
+                <div key={order.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, borderRadius: 12, border: "1px solid var(--base-700)", background: "rgba(18,22,35,.6)", padding: "10px 14px", flexWrap: "wrap" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <p style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{product ? product.title : "—"} <span style={{ fontWeight: 400, color: "#9ca3af" }}>· {order.customer_name}</span></p>
+                    <p style={{ margin: 0, fontSize: 12, color: info.color }}>{info.text}</p>
+                  </div>
+                  <a href={waUrl} target="_blank" rel="noopener noreferrer" style={{ display: "flex", alignItems: "center", gap: 6, borderRadius: 999, background: "var(--success-500)", color: "#fff", padding: "6px 12px", fontSize: 12, fontWeight: 500, flexShrink: 0 }}>
+                    <Icon.WhatsApp style={{ width: 13, height: 13 }} /> Contactar
+                  </a>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Últimas órdenes</h2>
       <OrdersTable db={db} orders={db.orders.slice(0, 5)} compact />
     </div>
@@ -1745,6 +1968,70 @@ const STATUS_STYLES = {
 
 function copyText(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).catch(() => {});
+}
+
+/* Genera el mensaje de entrega listo para WhatsApp de un pedido:
+   título del producto + duración en negrita, el bloque de acceso tal
+   cual se cargó en el inventario (correo, contraseña, perfil, PIN...)
+   y la fecha de vencimiento en negrita al final. Es solo el punto de
+   partida — siempre queda 100% editable antes de enviarlo. */
+function buildDeliveryMessage(order, product) {
+  if (!order) return "";
+  const durationLabel = (order.plan_duration_label || "").trim();
+  const titleUpper = product ? product.title.toUpperCase() : "TU PRODUCTO";
+  const header = `*${titleUpper}${durationLabel ? " " + durationLabel.toUpperCase() : ""}*`;
+  const body = (order.delivered_key || "").trim();
+  const expiry = order.expires_at
+    ? new Date(order.expires_at).toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "numeric" })
+    : "";
+  const parts = [header];
+  if (body) parts.push(body);
+  if (expiry) parts.push(`*VENCIMIENTO ${expiry}*`);
+  return parts.join("\n\n");
+}
+
+/* Modal con el mensaje de entrega editable de un pedido: se puede
+   regenerar desde la plantilla, copiar, o mandar directo por WhatsApp.
+   Todo lo que se escriba aquí se guarda en el pedido (delivery_message)
+   así que la próxima vez que se abra ya aparece tal cual se dejó. */
+function DeliveryMessageModal({ order, product, text, onChangeText, onClose, onRegenerate, onSave, onSend }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, padding: 16 }} onClick={onClose}>
+      <div className="slide-up" style={{ width: "100%", maxWidth: 480, background: "var(--base-900)", border: "1px solid var(--base-700)", borderRadius: 16, padding: 20, maxHeight: "90vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <h2 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>Mensaje de entrega</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#9ca3af" }}><Icon.X style={{ width: 18, height: 18 }} /></button>
+        </div>
+        <p style={{ margin: "0 0 12px", fontSize: 12, color: "#9ca3af" }}>
+          Para <strong style={{ color: "#fff" }}>{order.customer_name}</strong> · {product ? product.title : "—"}{order.plan_duration_label ? ` (${order.plan_duration_label})` : ""}. Edítalo libremente — los asteriscos (*así*) salen en <strong>negrita</strong> dentro de WhatsApp.
+        </p>
+        <textarea
+          rows={10}
+          value={text}
+          onChange={(e) => onChangeText(e.target.value)}
+          style={{ width: "100%", borderRadius: 10, border: "1px solid var(--base-700)", background: "var(--base-800)", padding: 12, fontSize: 13, color: "#fff", fontFamily: "inherit", resize: "vertical", lineHeight: 1.5 }}
+        />
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+          <button type="button" onClick={onRegenerate} style={{ borderRadius: 999, border: "1px solid var(--base-700)", background: "transparent", color: "#9ca3af", padding: "8px 14px", fontSize: 12 }}>
+            Regenerar plantilla
+          </button>
+          <button type="button" onClick={() => { copyText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
+            style={{ display: "flex", alignItems: "center", gap: 6, borderRadius: 999, border: "1px solid var(--base-700)", background: "transparent", color: "var(--accent-400)", padding: "8px 14px", fontSize: 12 }}>
+            <Icon.Copy style={{ width: 14, height: 14 }} /> {copied ? "¡Copiado!" : "Copiar"}
+          </button>
+          <button type="button" onClick={onSend}
+            style={{ display: "flex", alignItems: "center", gap: 6, borderRadius: 999, border: "none", background: "var(--success-500)", color: "#05060a", padding: "8px 14px", fontSize: 12, fontWeight: 700 }}>
+            <Icon.WhatsApp style={{ width: 14, height: 14 }} /> Enviar por WhatsApp
+          </button>
+          <button type="button" onClick={onSave}
+            style={{ marginLeft: "auto", borderRadius: 999, border: "none", background: "var(--accent-500)", color: "#05060a", padding: "8px 14px", fontSize: 12, fontWeight: 700 }}>
+            Guardar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /* Botones de estado con color propio — reemplaza el desplegable: un
@@ -1777,7 +2064,7 @@ function StatusButtons({ value, onChange }) {
   );
 }
 
-function OrdersTable({ db, orders, onChangeStatus, onDeleteOrder, compact }) {
+function OrdersTable({ db, orders, onChangeStatus, onDeleteOrder, onOpenDelivery, compact }) {
   return (
     <div style={{ overflowX: "auto", borderRadius: 12, border: "1px solid var(--base-700)" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
@@ -1787,6 +2074,8 @@ function OrdersTable({ db, orders, onChangeStatus, onDeleteOrder, compact }) {
             <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Cliente</th>
             <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Pago</th>
             <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Precio</th>
+            {!compact && <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Ganancia</th>}
+            {!compact && <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Vence</th>}
             {!compact && <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Cód. operación</th>}
             {!compact && <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Comprobante</th>}
             <th style={{ padding: "10px 12px", fontWeight: 500, color: "#9ca3af" }}>Estado</th>
@@ -1807,6 +2096,16 @@ function OrdersTable({ db, orders, onChangeStatus, onDeleteOrder, compact }) {
                   S/ {(o.price_at_order * (o.qty || 1) - (o.discount_amount || 0)).toFixed(2)}
                   {o.coupon_code && <><br /><span style={{ color: "#6b7280", fontSize: 11 }}>cupón: {o.coupon_code}</span></>}
                 </td>
+                {!compact && (
+                  <td style={{ padding: "10px 12px" }}>
+                    S/ {((o.price_at_order - (o.cost_at_order || 0)) * (o.qty || 1) - (o.discount_amount || 0)).toFixed(2)}
+                  </td>
+                )}
+                {!compact && (
+                  <td style={{ padding: "10px 12px", whiteSpace: "nowrap" }}>
+                    {(() => { const info = formatExpiry(o.expires_at); return <span style={{ color: info.color, fontSize: 12 }}>{info.text}</span>; })()}
+                  </td>
+                )}
                 {!compact && (
                   <td style={{ padding: "10px 12px" }}>
                     {o.operation_code ? (
@@ -1834,10 +2133,14 @@ function OrdersTable({ db, orders, onChangeStatus, onDeleteOrder, compact }) {
                 {!compact && (
                   <td style={{ padding: "10px 12px" }}>
                     {o.delivered_key ? (
-                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <code style={{ fontSize: 11, background: "var(--base-800)", padding: "2px 6px", borderRadius: 4 }}>{o.delivered_key}</code>
-                        <button title="Copiar" onClick={() => copyText(o.delivered_key)} style={{ background: "none", border: "none", color: "var(--accent-400)", padding: 2 }}><Icon.Copy style={{ width: 13, height: 13 }} /></button>
-                        <a title="Enviar por WhatsApp" href={`https://wa.me/${(o.customer_phone || "").replace(/\D/g, "")}?text=${encodeURIComponent(`Hola ${o.customer_name}, aquí tienes tu clave/licencia de "${product ? product.title : ""}":\n${o.delivered_key}`)}`} target="_blank" rel="noopener noreferrer" style={{ color: "var(--success-500)", display: "flex" }}><Icon.WhatsApp style={{ width: 13, height: 13 }} /></a>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <code style={{ fontSize: 11, background: "var(--base-800)", padding: "2px 6px", borderRadius: 4, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{o.delivered_key.split("\n")[0]}</code>
+                        <button title="Copiar clave" onClick={() => copyText(o.delivered_key)} style={{ background: "none", border: "none", color: "var(--accent-400)", padding: 2 }}><Icon.Copy style={{ width: 13, height: 13 }} /></button>
+                        {onOpenDelivery && (
+                          <button title="Mensaje de entrega (editable)" onClick={() => onOpenDelivery(o)} style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "1px solid var(--base-700)", borderRadius: 999, color: "var(--success-500)", padding: "2px 8px", fontSize: 11 }}>
+                            <Icon.WhatsApp style={{ width: 12, height: 12 }} /> {o.delivery_message ? "Editar" : "Generar"}
+                          </button>
+                        )}
                       </div>
                     ) : <span style={{ color: "#6b7280" }}>—</span>}
                   </td>
@@ -1854,7 +2157,7 @@ function OrdersTable({ db, orders, onChangeStatus, onDeleteOrder, compact }) {
             );
           })}
           {orders.length === 0 && (
-            <tr><td colSpan={compact ? 4 : (onDeleteOrder ? 9 : 8)} style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>Sin órdenes todavía.</td></tr>
+            <tr><td colSpan={compact ? 4 : (onDeleteOrder ? 11 : 10)} style={{ padding: 24, textAlign: "center", color: "#6b7280" }}>Sin órdenes todavía.</td></tr>
           )}
         </tbody>
       </table>
@@ -1864,6 +2167,8 @@ function OrdersTable({ db, orders, onChangeStatus, onDeleteOrder, compact }) {
 
 function AdminOrders({ db, setDb }) {
   const [toast, setToast] = useState(null);
+  const [deliveryOrderId, setDeliveryOrderId] = useState(null);
+  const [deliveryText, setDeliveryText] = useState("");
 
   useEffect(() => {
     if (!toast) return;
@@ -1887,11 +2192,22 @@ function AdminOrders({ db, setDb }) {
           const [nextKey, ...restKeys] = product.license_keys;
           deliveredKey = nextKey;
           products = prev.products.map((p) => p.id === product.id ? { ...p, license_keys: restKeys, stock: restKeys.length } : p);
-          setToast(`✓ Clave asignada automáticamente al pedido de ${order.customer_name}`);
+          setToast(`✓ Clave asignada y mensaje de entrega listo para ${order.customer_name}`);
         }
       }
 
-      const orders = prev.orders.map((o) => (o.id === orderId ? { ...o, status, delivered_key: deliveredKey } : o));
+      const orders = prev.orders.map((o) => {
+        if (o.id !== orderId) return o;
+        const updated = { ...o, status, delivered_key: deliveredKey };
+        // Apenas el pedido queda pagado/entregado y ya tiene clave/acceso,
+        // se arma de una vez el mensaje de entrega editable (si aún no
+        // existe uno guardado) para que quede listo para mandar.
+        if (becomingCompleted && deliveredKey && !o.delivery_message) {
+          const product = prev.products.find((p) => p.id === o.product_id);
+          updated.delivery_message = buildDeliveryMessage(updated, product);
+        }
+        return updated;
+      });
       const next = { ...prev, orders, products };
       saveDB(next);
       return next;
@@ -1905,18 +2221,54 @@ function AdminOrders({ db, setDb }) {
       saveDB(next);
       return next;
     });
+    if (deliveryOrderId === orderId) setDeliveryOrderId(null);
   }
+
+  function openDelivery(order) {
+    const product = db.products.find((p) => p.id === order.product_id);
+    setDeliveryOrderId(order.id);
+    setDeliveryText(order.delivery_message || buildDeliveryMessage(order, product));
+  }
+
+  function persistDeliveryText(text) {
+    if (deliveryOrderId == null) return;
+    setDb((prev) => {
+      const orders = prev.orders.map((o) => (o.id === deliveryOrderId ? { ...o, delivery_message: text } : o));
+      const next = { ...prev, orders };
+      saveDB(next);
+      return next;
+    });
+  }
+
+  const deliveryOrder = deliveryOrderId != null ? db.orders.find((o) => o.id === deliveryOrderId) : null;
+  const deliveryProduct = deliveryOrder ? db.products.find((p) => p.id === deliveryOrder.product_id) : null;
 
   return (
     <div>
       <h1 style={{ margin: "0 0 20px", fontSize: 22, fontWeight: 700 }}>Órdenes</h1>
       {toast && <div className="fade-in" style={{ marginBottom: 16, borderRadius: 10, border: "1px solid var(--success-500)", background: "rgba(34,197,94,.1)", color: "var(--success-500)", padding: "8px 14px", fontSize: 12 }}>{toast}</div>}
-      <OrdersTable db={db} orders={db.orders} onChangeStatus={handleChangeStatus} onDeleteOrder={handleDeleteOrder} />
+      <OrdersTable db={db} orders={db.orders} onChangeStatus={handleChangeStatus} onDeleteOrder={handleDeleteOrder} onOpenDelivery={openDelivery} />
+      {deliveryOrder && (
+        <DeliveryMessageModal
+          order={deliveryOrder}
+          product={deliveryProduct}
+          text={deliveryText}
+          onChangeText={setDeliveryText}
+          onClose={() => { persistDeliveryText(deliveryText); setDeliveryOrderId(null); }}
+          onRegenerate={() => setDeliveryText(buildDeliveryMessage(deliveryOrder, deliveryProduct))}
+          onSave={() => { persistDeliveryText(deliveryText); setToast("✓ Mensaje guardado"); }}
+          onSend={() => {
+            persistDeliveryText(deliveryText);
+            const url = `https://wa.me/${(deliveryOrder.customer_phone || "").replace(/\D/g, "")}?text=${encodeURIComponent(deliveryText)}`;
+            window.open(url, "_blank", "noopener,noreferrer");
+          }}
+        />
+      )}
     </div>
   );
 }
 
-const emptyProductForm = { title: "", description: "", stock: "0", category_id: "", image_url: "", features: "", is_active: true, plans: [{ id: uid(), duration_label: "1 mes", price: "" }], license_keys: "" };
+const emptyProductForm = { title: "", description: "", stock: "0", category_id: "", image_url: "", features: "", is_active: true, plans: [{ id: uid(), duration_label: "1 mes", price: "", cost: "" }], license_keys: "" };
 
 /* Lee un archivo de imagen, lo redimensiona (máx 800px de ancho) y lo comprime
    a JPEG para que quepa cómodamente en localStorage como data URL. */
@@ -1952,8 +2304,8 @@ function AdminProducts({ db, setDb }) {
     setForm({
       title: p.title, description: p.description || "", stock: String(p.stock), category_id: p.category_id || "", image_url: p.image_url || "",
       features: p.features.join(", "), is_active: p.is_active,
-      plans: (p.plans || []).map((pl) => ({ id: pl.id, duration_label: pl.duration_label, price: String(pl.price) })),
-      license_keys: (p.license_keys || []).join("\n"),
+      plans: (p.plans || []).map((pl) => ({ id: pl.id, duration_label: pl.duration_label, price: String(pl.price), cost: pl.cost ? String(pl.cost) : "" })),
+      license_keys: (p.license_keys || []).join("\n\n"),
     });
     setImgError(null);
     setEditing(p.id);
@@ -1961,7 +2313,7 @@ function AdminProducts({ db, setDb }) {
   function cancel() { setEditing(null); setForm(emptyProductForm); setImgError(null); }
 
   function addPlan() {
-    setForm((f) => ({ ...f, plans: [...f.plans, { id: uid(), duration_label: "1 mes", price: "" }] }));
+    setForm((f) => ({ ...f, plans: [...f.plans, { id: uid(), duration_label: "1 mes", price: "", cost: "" }] }));
   }
   function updatePlan(id, patch) {
     setForm((f) => ({ ...f, plans: f.plans.map((pl) => pl.id === id ? { ...pl, ...patch } : pl) }));
@@ -1975,8 +2327,11 @@ function AdminProducts({ db, setDb }) {
   function save() {
     if (!form.title.trim() || validPlans.length === 0) return;
     const featuresArr = form.features.split(",").map((s) => s.trim()).filter(Boolean);
-    const plansArr = validPlans.map((pl) => ({ id: pl.id, duration_label: pl.duration_label.trim(), price: parseFloat(pl.price) || 0 }));
-    const licenseKeysArr = form.license_keys.split("\n").map((s) => s.trim()).filter(Boolean);
+    const plansArr = validPlans.map((pl) => ({ id: pl.id, duration_label: pl.duration_label.trim(), price: parseFloat(pl.price) || 0, cost: parseFloat(pl.cost) || 0 }));
+    // Cada "clave" puede ser una sola línea (ej. una licencia) o un bloque
+    // de varias líneas (ej. CORREO / Contraseña / Perfil / PIN de una cuenta
+    // compartida) — los bloques se separan con una línea en blanco.
+    const licenseKeysArr = form.license_keys.split(/\n\s*\n/).map((s) => s.trim()).filter(Boolean);
     // Si el admin gestiona claves/licencias, el stock lo dicta automáticamente
     // la cantidad de claves disponibles (así nunca se vende algo que ya no hay).
     const effectiveStock = licenseKeysArr.length > 0 ? licenseKeysArr.length : (parseInt(form.stock) || 0);
@@ -2067,19 +2422,20 @@ function AdminProducts({ db, setDb }) {
 
           <div style={{ marginBottom: 12 }}>
             <label style={labelStyle}>Descripción</label>
-            <textarea rows={3} style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} value={form.description}
+            <textarea rows={5} style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
-              placeholder="Describe el producto: qué incluye, para quién es, qué lo hace especial..." />
+              placeholder={"Describe el producto: qué incluye, para quién es, qué lo hace especial...\n\nTip: pon cada punto en una línea nueva empezando con \"-\", así:\n- Acceso a más de 100 millones de fotos\n- Exportación en alta calidad (PNG, JPG, PDF)\n- 1 TB de almacenamiento en la nube"} />
+            <p style={{ margin: "6px 0 0", fontSize: 11, color: "#6b7280" }}>Tip: escribe un punto por línea. Si una línea empieza con "-", "•" o "*" se muestra como viñeta en la tienda; el resto se muestra como párrafo normal.</p>
           </div>
 
           <div style={{ marginBottom: 12 }}>
             <label style={labelStyle}>Planes de duración y precio</label>
-            <p style={{ margin: "0 0 8px", fontSize: 11, color: "#6b7280" }}>Elige tú qué duraciones ofrecer para este producto (1 mes, 2 meses, 3 meses, por año, etc.). No hace falta agregar todas — solo las que apliquen.</p>
+            <p style={{ margin: "0 0 8px", fontSize: 11, color: "#6b7280" }}>Elige tú qué duraciones ofrecer para este producto (1 mes, 2 meses, 3 meses, por año, etc.). No hace falta agregar todas — solo las que apliquen. El "Costo" es lo que a ti te cuesta ese plan (opcional, sirve para calcular tu ganancia real en el Dashboard).</p>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {form.plans.map((pl) => {
                 const isPreset = DURATION_PRESETS.includes(pl.duration_label);
                 return (
-                  <div key={pl.id} style={{ display: "grid", gridTemplateColumns: isPreset ? "1fr 1fr auto" : "1fr 1fr 1fr auto", gap: 8, alignItems: "center" }}>
+                  <div key={pl.id} style={{ display: "grid", gridTemplateColumns: isPreset ? "1fr 1fr 1fr auto" : "1fr 1fr 1fr 1fr auto", gap: 8, alignItems: "center" }}>
                     <Dropdown
                       value={isPreset ? pl.duration_label : "custom"}
                       onChange={(v) => updatePlan(pl.id, { duration_label: v === "custom" ? "" : v })}
@@ -2089,7 +2445,8 @@ function AdminProducts({ db, setDb }) {
                     {!isPreset && (
                       <input style={inputStyle} placeholder="Ej: 2 meses" value={pl.duration_label} onChange={(e) => updatePlan(pl.id, { duration_label: e.target.value })} />
                     )}
-                    <input type="number" style={inputStyle} placeholder="Precio (S/)" value={pl.price} onChange={(e) => updatePlan(pl.id, { price: e.target.value })} />
+                    <input type="number" style={inputStyle} placeholder="Precio venta (S/)" value={pl.price} onChange={(e) => updatePlan(pl.id, { price: e.target.value })} />
+                    <input type="number" style={inputStyle} placeholder="Costo (S/, opcional)" value={pl.cost} onChange={(e) => updatePlan(pl.id, { cost: e.target.value })} />
                     <button type="button" onClick={() => removePlan(pl.id)} style={{ background: "none", border: "none", color: "var(--signal-400)", padding: 4 }}><Icon.Trash style={{ width: 15, height: 15 }} /></button>
                   </div>
                 );
@@ -2114,12 +2471,12 @@ function AdminProducts({ db, setDb }) {
             <input style={inputStyle} value={form.features} onChange={(e) => setForm({ ...form, features: e.target.value })} placeholder="Ej: Acceso ilimitado, Soporte 24/7" />
           </div>
           <div style={{ marginBottom: 12 }}>
-            <label style={labelStyle}><Icon.Key style={{ width: 12, height: 12, display: "inline", marginRight: 4, verticalAlign: "-1px" }} />Claves / licencias digitales (una por línea, opcional)</label>
-            <textarea rows={4} style={{ ...inputStyle, resize: "vertical", fontFamily: "monospace", fontSize: 12 }} value={form.license_keys}
+            <label style={labelStyle}><Icon.Key style={{ width: 12, height: 12, display: "inline", marginRight: 4, verticalAlign: "-1px" }} />Claves / cuentas digitales (opcional)</label>
+            <textarea rows={8} style={{ ...inputStyle, resize: "vertical", fontFamily: "monospace", fontSize: 12 }} value={form.license_keys}
               onChange={(e) => setForm({ ...form, license_keys: e.target.value })}
-              placeholder={"XXXX-XXXX-XXXX-XXXX\nYYYY-YYYY-YYYY-YYYY"} />
+              placeholder={"CORREO: cuenta1@gmail.com\nContraseña: Clave2026\nPerfil: CAMILA\nPIN: 1641\n\nCORREO: cuenta2@gmail.com\nContraseña: Clave2027\nPerfil: JUAN\nPIN: 2208"} />
             <p style={{ margin: "6px 0 0", fontSize: 11, color: "#6b7280" }}>
-              Si llenas este campo, el stock se calcula automáticamente según cuántas claves quedan (una se descuenta y se entrega sola cada vez que marcas un pedido como pagado/entregado). Déjalo vacío para llevar el stock manualmente.
+              Cada cuenta puede ser una sola línea (una licencia simple) o un bloque de varias líneas (correo, contraseña, perfil, PIN...) tal como lo vas a mandar al cliente. Separa una cuenta de otra dejando una línea en blanco entre ellas. El stock se calcula solo según cuántas cuentas quedan: una se descuenta y se entrega automáticamente cada vez que marcas un pedido como pagado/entregado, y de una vez queda armado el mensaje de WhatsApp editable listo para mandar. Déjalo vacío para llevar el stock manualmente.
             </p>
           </div>
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#d1d5db", marginBottom: 16 }}>
@@ -2149,7 +2506,10 @@ function AdminProducts({ db, setDb }) {
                 <td style={{ padding: "10px 12px" }}>{p.title}<br /><span style={{ color: "#6b7280", fontSize: 11 }}>{(p.plans || []).map((pl) => pl.duration_label).join(" · ")}</span></td>
                 <td style={{ padding: "10px 12px" }}>
                   {(p.plans || []).map((pl) => (
-                    <div key={pl.id} style={{ whiteSpace: "nowrap" }}>S/ {pl.price.toFixed(2)} <span style={{ color: "#6b7280", fontSize: 11 }}>({pl.duration_label})</span></div>
+                    <div key={pl.id} style={{ whiteSpace: "nowrap" }}>
+                      S/ {pl.price.toFixed(2)} <span style={{ color: "#6b7280", fontSize: 11 }}>({pl.duration_label})</span>
+                      {!!pl.cost && <span style={{ color: "var(--success-500)", fontSize: 11 }}> · margen S/ {(pl.price - pl.cost).toFixed(2)}</span>}
+                    </div>
                   ))}
                 </td>
                 <td style={{ padding: "10px 12px" }}>{p.stock}</td>
@@ -2636,15 +2996,21 @@ function AdminSettings({ db, setDb }) {
 function AdminShell({ db, setDb }) {
   const [section, setSection] = useState("dashboard");
   const [loggedIn, setLoggedIn] = useState(sessionStorage.getItem("digitalstore_admin_session") === "1");
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   function logout() { sessionStorage.removeItem("digitalstore_admin_session"); setLoggedIn(false); }
 
   if (!loggedIn) return <AdminLogin db={db} onLoggedIn={() => setLoggedIn(true)} />;
 
+  const sectionLabels = { dashboard: "Dashboard", products: "Productos", categories: "Categorías", orders: "Órdenes", coupons: "Cupones", reviews: "Reseñas", faq: "FAQ", settings: "Configuración" };
+
   return (
     <div style={{ display: "flex", minHeight: "100vh" }}>
-      <AdminSidebar section={section} onNavigate={setSection} onLogout={logout} />
-      <div style={{ flex: 1, padding: 32, overflowX: "auto" }}>
+      <AdminSidebar section={section} onNavigate={setSection} onLogout={logout} mobileOpen={mobileSidebarOpen} onCloseMobile={() => setMobileSidebarOpen(false)} />
+      <div className="admin-content" style={{ flex: 1, padding: 32, overflowX: "auto", minWidth: 0 }}>
+        <button onClick={() => setMobileSidebarOpen(true)} className="admin-mobile-toggle" style={{ display: "none", alignItems: "center", gap: 8, marginBottom: 16, background: "var(--base-800)", border: "1px solid var(--base-700)", color: "#fff", padding: "8px 12px", borderRadius: 10, fontSize: 13 }}>
+          <Icon.Menu style={{ width: 16, height: 16 }} /> {sectionLabels[section] || "Menú"}
+        </button>
         {section === "dashboard" && <AdminDashboard db={db} />}
         {section === "products" && <AdminProducts db={db} setDb={setDb} />}
         {section === "categories" && <AdminCategories db={db} setDb={setDb} />}
@@ -2742,6 +3108,26 @@ function applyResponsiveStyles() {
     }
     @media (min-width: 768px) {
       .mobile-toggle { display: none !important; }
+    }
+    /* Panel Admin: en pantallas chicas el sidebar se convierte en un cajón
+       deslizante (oculto por defecto) y aparece un botón de menú arriba del
+       contenido para abrirlo; antes no existía ninguna versión mobile y el
+       sidebar de 220px simplemente aplastaba el contenido. */
+    @media (max-width: 767px) {
+      .admin-sidebar {
+        position: fixed; top: 0; left: 0; height: 100vh; height: 100dvh; z-index: 60;
+        transform: translateX(-100%); transition: transform .22s ease;
+        box-shadow: 0 0 40px rgba(0,0,0,.5);
+        overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+        min-height: 0 !important;
+      }
+      .admin-sidebar.open { transform: translateX(0); }
+      .admin-sidebar-close { display: block !important; }
+      .admin-mobile-toggle { display: flex !important; }
+      .admin-content { padding: 16px !important; }
+    }
+    @media (min-width: 768px) {
+      .admin-sidebar-overlay { display: none !important; }
     }
     @media (min-width: 640px) {
       .products-grid { grid-template-columns: repeat(2,1fr) !important; }
